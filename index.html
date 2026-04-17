@@ -1020,7 +1020,7 @@
             revenueData: JSON.parse(localStorage.getItem('revenueData') || '{}'),
             projectsData: JSON.parse(localStorage.getItem('projectsData') || '[]'),
             planData: JSON.parse(localStorage.getItem('planData') || '[]'),
-            articles: JSON.parse(localStorage.getItem('articles') || 'null') || getDefaultArticles(),
+            articles: getDefaultArticles(), // Структура статей всегда из кода (данные в calendarData/revenueData)
             cellComments: JSON.parse(localStorage.getItem('cellComments') || '{}'),
             collapsedSections: JSON.parse(localStorage.getItem('collapsedSections') || '{}'),
             charts: {}
@@ -1046,16 +1046,20 @@
                 // ПОСТОЯННЫЕ РАСХОДЫ
                 { section: true, name: 'Постоянные расходы' },
                 
-                // Административные расходы (подраздел)
+                // Административные расходы (подраздел level 1)
+                // Итого = заправка + юр + охрана труда + мигр учет (до первого вложенного subsection)
                 { name: 'Административные расходы', type: 'expense', indent: true, subsection: true },
                 { name: 'Заправка картриджей', key: 'cartridges', type: 'expense', indent: true, level: 2 },
                 { name: 'Юридические расходы', key: 'legal', type: 'expense', indent: true, level: 2 },
+                { name: 'Охрана труда', key: 'labor_safety', type: 'expense', indent: true, level: 2 },
+                { name: 'Миграционный учет', key: 'migration', type: 'expense', indent: true, level: 2 },
+                // Офисные сотрудники: ФОТ + НДФЛ + ПФР + ФСС (без охраны труда)
                 { name: 'Офисные сотрудники', type: 'expense', indent: true, level: 2, subsection: true },
                 { name: 'ФОТ (к выплате)', key: 'office_fot', type: 'expense', indent: true, level: 3 },
                 { name: 'НДФЛ', key: 'office_ndfl', type: 'expense', indent: true, level: 3 },
                 { name: 'Страховые взносы ПФР', key: 'office_pfr', type: 'expense', indent: true, level: 3 },
                 { name: 'Страховые взносы ФСС', key: 'office_fss', type: 'expense', indent: true, level: 3 },
-                { name: 'Охрана труда', key: 'labor_safety', type: 'expense', indent: true, level: 2 },
+                // Сервисы
                 { name: 'Сервисы', type: 'expense', indent: true, level: 2, subsection: true },
                 { name: 'AmoCRM', key: 'amocrm', type: 'expense', indent: true, level: 3 },
                 { name: '1C', key: '1c', type: 'expense', indent: true, level: 3 },
@@ -1064,17 +1068,11 @@
                 { name: 'Бухгалтерия', key: 'accounting', type: 'expense', indent: true, level: 3 },
                 { name: 'Инфо сервисы', key: 'info_services', type: 'expense', indent: true, level: 3 },
                 
-                // Маркетинг (подраздел level 1)
+                // Маркетинг (подраздел level 1) — без миграционного учета
                 { name: 'Маркетинг', type: 'expense', indent: true, subsection: true },
                 { name: 'Реклама', key: 'ads', type: 'expense', indent: true, level: 2 },
                 { name: 'Я. Директ: бюджет', key: 'yandex_budget', type: 'expense', indent: true, level: 2 },
                 { name: 'Я. Директ: подрядчик', key: 'yandex_contractor', type: 'expense', indent: true, level: 2 },
-                { name: 'Миграционный учет', key: 'migration', type: 'expense', indent: true, level: 2 },
-                
-                // Лизинг и кредиты (подраздел level 1)
-                { name: 'Лизинг и кредиты', type: 'expense', indent: true, subsection: true },
-                { name: 'Лизинг', key: 'leasing', type: 'expense', indent: true, level: 2 },
-                { name: 'Кредиты', key: 'credit', type: 'expense', indent: true, level: 2 },
 
                 // Прочее (подраздел level 1)
                 { name: 'Прочее', type: 'expense', indent: true, subsection: true },
@@ -1082,6 +1080,11 @@
                 { name: 'Бензин', key: 'fuel', type: 'expense', indent: true, level: 2 },
                 { name: 'Комиссия банка', key: 'bank_commission', type: 'expense', indent: true, level: 2 },
                 { name: 'Разовая оплата', key: 'one_time', type: 'expense', indent: true, level: 2 },
+
+                // Лизинг и кредиты — ниже постоянных расходов (последний подраздел)
+                { name: 'Лизинг и кредиты', type: 'expense', indent: true, subsection: true },
+                { name: 'Лизинг', key: 'leasing', type: 'expense', indent: true, level: 2 },
+                { name: 'Кредиты', key: 'credit', type: 'expense', indent: true, level: 2 },
 
                 // Нераспределённые
                 { section: true, name: 'Нераспределённые' },
