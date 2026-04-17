@@ -4,6 +4,56 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Авагар – Финансовый учет</title>
+
+  <!-- SUPABASE SYNC -->
+  <script>
+  (function(){
+    const SB_URL = 'https://nkzwwxdswourjbwyqmqy.supabase.co';
+    const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5rend3eGRzd291cmpid3lxbXF5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzODI3NzksImV4cCI6MjA5MTk1ODc3OX0.P9asLiG_0cMJZ9zXc_wNGBCnfe9ysPTn_DSZA10ZtPY';
+    const TABLE = 'finance_data';
+    const HEADERS = {'apikey': SB_KEY, 'Authorization': 'Bearer '+SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates'};
+
+    // Save to Supabase
+    function sbSet(key, value){
+      fetch(SB_URL+'/rest/v1/'+TABLE, {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({key, content: value, updated_at: new Date().toISOString()})
+      }).catch(()=>{});
+    }
+
+    // Override localStorage.setItem to also sync to Supabase
+    const origSetItem = localStorage.setItem.bind(localStorage);
+    localStorage.setItem = function(key, value){
+      origSetItem(key, value);
+      sbSet(key, value);
+    };
+
+    // On load: fetch all data from Supabase and populate localStorage
+    window.addEventListener('DOMContentLoaded', async function(){
+      // Show loading indicator
+      document.body.insertAdjacentHTML('afterbegin',
+        '<div id="sb-loading" style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#0066CC;color:#fff;text-align:center;padding:10px;font-family:sans-serif;font-size:14px">⏳ Загрузка данных...</div>'
+      );
+      try {
+        const r = await fetch(SB_URL+'/rest/v1/'+TABLE+'?select=key,content', {headers: {'apikey': SB_KEY, 'Authorization': 'Bearer '+SB_KEY}});
+        const rows = await r.json();
+        if(Array.isArray(rows) && rows.length){
+          const origSet = localStorage.setItem.bind(localStorage);
+          rows.forEach(row => {
+            if(row.key && row.content !== null){
+              origSet(row.key, row.content);
+            }
+          });
+        }
+      } catch(e){
+        console.warn('Supabase load error', e);
+      }
+      const el = document.getElementById('sb-loading');
+      if(el) el.remove();
+    });
+  })();
+  </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <style>
