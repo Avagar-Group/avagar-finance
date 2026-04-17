@@ -40,13 +40,41 @@
         if(Array.isArray(rows) && rows.length){
           const origSet = localStorage.setItem.bind(localStorage);
           let loaded = false;
+
           rows.forEach(row => {
-            if(row.key && row.content !== null){
+            if(!row.key || row.content === null) return;
+
+            // Умное слияние: для массивов (calendarData, projectsData, planData) — объединяем уникальные элементы
+            // Для объектов (revenueData, cellComments) — глубокое слияние
+            const localRaw = localStorage.getItem(row.key);
+
+            if(row.key === 'calendarData' || row.key === 'projectsData' || row.key === 'planData'){
+              try {
+                const sbArr = JSON.parse(row.content) || [];
+                const localArr = JSON.parse(localRaw || '[]') || [];
+                // Merge: items from local that are not in SB (by id), plus all SB items
+                const sbIds = new Set(sbArr.map(x => x.id).filter(Boolean));
+                const localOnly = localArr.filter(x => x.id && !sbIds.has(x.id));
+                const merged = [...sbArr, ...localOnly];
+                origSet(row.key, JSON.stringify(merged));
+              } catch(e){ origSet(row.key, row.content); }
+            } else if(row.key === 'revenueData' || row.key === 'cellComments' || row.key === 'collapsedSections'){
+              try {
+                const sbObj = JSON.parse(row.content) || {};
+                const localObj = JSON.parse(localRaw || '{}') || {};
+                // Deep merge: local wins for keys not in SB
+                const merged = Object.assign({}, sbObj, 
+                  Object.fromEntries(Object.entries(localObj).filter(([k]) => !(k in sbObj)))
+                );
+                origSet(row.key, JSON.stringify(merged));
+              } catch(e){ origSet(row.key, row.content); }
+            } else {
+              // Для остальных (articles, planData и пр.) — берём из Supabase
               origSet(row.key, row.content);
-              loaded = true;
             }
+            loaded = true;
           });
-          // После загрузки данных — обновляем appState и перерисовываем
+
           if(loaded && window.reloadAppState){
             window.reloadAppState();
           }
