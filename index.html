@@ -13,14 +13,17 @@
     const TABLE = 'finance_data';
     const HEADERS = {'apikey': SB_KEY, 'Authorization': 'Bearer '+SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates'};
 
-    // Save to Supabase
+    // Save to Supabase (returns promise so callers can await completion)
     function sbSet(key, value){
-      fetch(SB_URL+'/rest/v1/'+TABLE, {
+      return fetch(SB_URL+'/rest/v1/'+TABLE, {
         method: 'POST',
         headers: HEADERS,
         body: JSON.stringify({key, content: value, updated_at: new Date().toISOString()})
       }).catch(()=>{});
     }
+
+    // Экспортируем для использования из confirmClearData и других мест
+    window.sbSet = sbSet;
 
     // Override localStorage.setItem to also sync to Supabase
     const origSetItem = localStorage.setItem.bind(localStorage);
@@ -44,8 +47,53 @@
           rows.forEach(row => {
             if(!row.key || row.content === null) return;
 
-            // Supabase — источник правды. Просто перезаписываем localStorage.
-            origSet(row.key, row.content);
+            // Умное слияние: для массивов (calendarData, projectsData, planData) — объединяем уникальные элементы
+            // Для объектов (revenueData, cellComments) — глубокое слияние
+            const localRaw = localStorage.getItem(row.key);
+
+            if(row.key === 'calendarData' || row.key === 'projectsData' || row.key === 'planData'){
+              try {
+                const sbArr = JSON.parse(row.content) || [];
+                const localArr = JSON.parse(localRaw || '[]') || [];
+                // Merge: items from local that are not in SB (by id), plus all SB items
+                const sbIds = new Set(sbArr.map(x => x.id).filter(Boolean));
+                const localOnly = localArr.filter(x => x.id && !sbIds.has(x.id));
+                const merged = [...sbArr, ...localOnly];
+                origSet(row.key, JSON.stringify(merged));
+              } catch(e){ origSet(row.key, row.content); }
+            } else if(row.key === 'revenueData'){
+              try {
+                const sbObj = JSON.parse(row.content) || {};
+                const localObj = JSON.parse(localRaw || '{}') || {};
+                // Deep merge revenueData: { "2026-01": { fot: 0, revenue: 100, ... }, ... }
+                const merged = Object.assign({}, localObj);
+                Object.entries(sbObj).forEach(([month, sbMonthData]) => {
+                  if(!merged[month]){
+                    merged[month] = sbMonthData;
+                  } else {
+                    // Merge month-level keys: take max value (whichever is non-zero)
+                    merged[month] = Object.assign({}, merged[month]);
+                    Object.entries(sbMonthData).forEach(([k, v]) => {
+                      if(v && !merged[month][k]) merged[month][k] = v;
+                      else if(v && merged[month][k]) merged[month][k] = Math.max(merged[month][k], v);
+                    });
+                  }
+                });
+                origSet(row.key, JSON.stringify(merged));
+              } catch(e){ origSet(row.key, row.content); }
+            } else if(row.key === 'cellComments' || row.key === 'collapsedSections'){
+              try {
+                const sbObj = JSON.parse(row.content) || {};
+                const localObj = JSON.parse(localRaw || '{}') || {};
+                const merged = Object.assign({}, sbObj,
+                  Object.fromEntries(Object.entries(localObj).filter(([k]) => !(k in sbObj)))
+                );
+                origSet(row.key, JSON.stringify(merged));
+              } catch(e){ origSet(row.key, row.content); }
+            } else {
+              // Для остальных (articles, planData и пр.) — берём из Supabase
+              origSet(row.key, row.content);
+            }
             loaded = true;
           });
 
@@ -765,6 +813,7 @@
                     <option value="sales">Продажи</option>
                     <option value="salary">Зарплата</option>
                     <option value="purchases">Покупки</option>
+                    <option value="manual">Вручную</option>
                 </select>
                 <input type="text" id="registrySearch" placeholder="Поиск по назначению..."
                     oninput="updateRegistry()" style="padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; width: 250px;">
@@ -1088,10 +1137,10 @@
                 { name: 'Комиссия банка', key: 'bank_commission', type: 'expense', indent: true, level: 2 },
                 { name: 'Разовая оплата', key: 'one_time', type: 'expense', indent: true, level: 2 },
 
-                // Лизинг и кредиты — ниже постоянных расходов (последний подраздел)
-                { name: 'Лизинг и кредиты', type: 'expense', indent: true, subsection: true },
-                { name: 'Лизинг', key: 'leasing', type: 'expense', indent: true, level: 2 },
-                { name: 'Кредиты', key: 'credit', type: 'expense', indent: true, level: 2 },
+                // ЛИЗИНГ И КРЕДИТЫ — отдельная секция, ниже операционной прибыли
+                { section: true, name: 'Лизинг и кредиты' },
+                { name: 'Лизинг', key: 'leasing', type: 'expense', indent: true },
+                { name: 'Кредиты', key: 'credit', type: 'expense', indent: true },
 
                 // Нераспределённые
                 { section: true, name: 'Нераспределённые' },
@@ -1405,8 +1454,9 @@
             let marketingTotal = {};
             let officeTotal = {};
             let otherTotal = {};
+            let leasingCreditTotal = {};
             let belowOpTotal = {};
-            
+
             months.forEach(m => {
                 revenueTotal[m] = 0;
                 costTotal[m] = 0;
@@ -1414,6 +1464,7 @@
                 marketingTotal[m] = 0;
                 officeTotal[m] = 0;
                 otherTotal[m] = 0;
+                leasingCreditTotal[m] = 0;
                 belowOpTotal[m] = 0;
             });
             
@@ -1489,13 +1540,70 @@
                         tbody += '<tr class="opu-total"><td>Итого постоянные расходы</td>';
                         let totalFixed = 0;
                         months.forEach(m => {
-                            const fixed = adminTotal[m] + marketingTotal[m] + otherTotal[m];
+                            const fixed = adminTotal[m] + marketingTotal[m] + officeTotal[m] + otherTotal[m];
                             totalFixed += fixed;
                             tbody += `<td>${formatMoney(fixed)}</td>`;
                         });
                         tbody += `<td>${formatMoney(totalFixed)}</td></tr>`;
+
+                        // ДОЛЯ АДМИНИСТРАТИВНЫХ РАСХОДОВ ОТ ВЫРУЧКИ
+                        tbody += '<tr class="opu-total" style="background: var(--bg-secondary);"><td>Доля административных расходов от выручки, %</td>';
+                        let totalAdminSum = 0, totalRevForAdmin = 0;
+                        months.forEach(m => {
+                            totalAdminSum += adminTotal[m];
+                            totalRevForAdmin += revenueTotal[m];
+                            const adminPercent = revenueTotal[m] > 0 ? (adminTotal[m] / revenueTotal[m] * 100) : 0;
+                            tbody += `<td>${formatPercent(adminPercent)}</td>`;
+                        });
+                        const avgAdminPct = totalRevForAdmin > 0 ? (totalAdminSum / totalRevForAdmin * 100) : 0;
+                        tbody += `<td>${formatPercent(avgAdminPct)}</td></tr>`;
+
+                        // ОПЕРАЦИОННАЯ ПРИБЫЛЬ = Выручка - Себестоимость - Постоянные расходы
+                        tbody += '<tr class="opu-total" style="background:#e8f4ff;"><td><strong>Операционная прибыль</strong></td>';
+                        let totalOpProfit = 0;
+                        months.forEach(m => {
+                            const fixed = adminTotal[m] + marketingTotal[m] + officeTotal[m] + otherTotal[m];
+                            const opProfit = revenueTotal[m] - costTotal[m] - fixed;
+                            totalOpProfit += opProfit;
+                            tbody += `<td class="${opProfit >= 0 ? 'positive' : 'negative'}"><strong>${formatMoney(opProfit)}</strong></td>`;
+                        });
+                        tbody += `<td class="${totalOpProfit >= 0 ? 'positive' : 'negative'}"><strong>${formatMoney(totalOpProfit)}</strong></td></tr>`;
+
+                        // ОПЕРАЦИОННАЯ РЕНТАБЕЛЬНОСТЬ %
+                        tbody += '<tr class="opu-total" style="background:#e8f4ff;"><td>Операционная рентабельность, %</td>';
+                        let totalRevenueSum = 0;
+                        months.forEach(m => totalRevenueSum += revenueTotal[m]);
+                        months.forEach(m => {
+                            const fixed = adminTotal[m] + marketingTotal[m] + officeTotal[m] + otherTotal[m];
+                            const opPct = revenueTotal[m] > 0 ? ((revenueTotal[m] - costTotal[m] - fixed) / revenueTotal[m] * 100) : 0;
+                            tbody += `<td>${formatPercent(opPct)}</td>`;
+                        });
+                        const avgOpPct = totalRevenueSum > 0 ? (totalOpProfit / totalRevenueSum * 100) : 0;
+                        tbody += `<td>${formatPercent(avgOpPct)}</td></tr>`;
                     }
-                    
+
+                    if (currentSection === 'Лизинг и кредиты') {
+                        // Итого лизинг и кредиты
+                        tbody += '<tr class="opu-total"><td>Итого лизинг и кредиты</td>';
+                        let totalLC = 0;
+                        months.forEach(m => {
+                            totalLC += leasingCreditTotal[m];
+                            tbody += `<td>${formatMoney(leasingCreditTotal[m])}</td>`;
+                        });
+                        tbody += `<td>${formatMoney(totalLC)}</td></tr>`;
+
+                        // ЧИСТАЯ ПРИБЫЛЬ = Операционная прибыль - Лизинг - Кредиты
+                        tbody += '<tr class="opu-total" style="background:#d4edda;"><td><strong>Чистая прибыль</strong></td>';
+                        let totalNet = 0;
+                        months.forEach(m => {
+                            const fixed = adminTotal[m] + marketingTotal[m] + officeTotal[m] + otherTotal[m];
+                            const net = revenueTotal[m] - costTotal[m] - fixed - leasingCreditTotal[m];
+                            totalNet += net;
+                            tbody += `<td class="${net >= 0 ? 'positive' : 'negative'}"><strong>${formatMoney(net)}</strong></td>`;
+                        });
+                        tbody += `<td class="${totalNet >= 0 ? 'positive' : 'negative'}"><strong>${formatMoney(totalNet)}</strong></td></tr>`;
+                    }
+
                     // Новая секция
                     currentSection = article.name;
                     window.currentSubsection = null; // Сбрасываем подраздел
@@ -1615,6 +1723,8 @@
                                 } else {
                                     otherTotal[m] += value;
                                 }
+                            } else if (currentSection === 'Лизинг и кредиты') {
+                                leasingCreditTotal[m] += value;
                             }
                             
                             const clickable = value > 0 ? 'style="cursor: pointer; transition: background 0.15s;" onmouseover="this.style.background=\'#f0f0f5\'" onmouseout="this.style.background=\'\'"' : '';
@@ -1632,72 +1742,6 @@
                 }
             });
             
-            // Операционная прибыль
-            tbody += '<tr><td colspan="' + (months.length + 2) + '"></td></tr>';
-            tbody += '<tr class="opu-total"><td>Операционная прибыль</td>';
-            let totalOperating = 0;
-            months.forEach(m => {
-                const operating = revenueTotal[m] - costTotal[m] - adminTotal[m] - marketingTotal[m] - officeTotal[m] - otherTotal[m];
-                totalOperating += operating;
-                tbody += `<td class="${operating >= 0 ? 'positive' : 'negative'}">${formatMoney(operating)}</td>`;
-            });
-            tbody += `<td class="${totalOperating >= 0 ? 'positive' : 'negative'}">${formatMoney(totalOperating)}</td></tr>`;
-            
-            // ДОЛЯ АДМИНИСТРАТИВНЫХ РАСХОДОВ ОТ ВЫРУЧКИ
-            tbody += '<tr class="opu-total" style="background: var(--bg-secondary);"><td>Доля административных расходов от выручки, %</td>';
-            let totalAdminSum = 0;
-            let totalRevForAdmin = 0;
-            months.forEach(m => {
-                totalAdminSum += adminTotal[m];
-                totalRevForAdmin += revenueTotal[m];
-            });
-            const avgAdminPct = totalRevForAdmin > 0 ? (totalAdminSum / totalRevForAdmin * 100) : 0;
-            
-            months.forEach(m => {
-                const adminPercent = revenueTotal[m] > 0 ? (adminTotal[m] / revenueTotal[m] * 100) : 0;
-                tbody += `<td>${formatPercent(adminPercent)}</td>`;
-            });
-            tbody += `<td>${formatPercent(avgAdminPct)}</td></tr>`;
-            
-            // === ОПЕРАЦИОННАЯ ПРИБЫЛЬ (после всех постоянных расходов) ===
-            
-            // Операционная прибыль (Маржинальная прибыль - Постоянные расходы)
-            tbody += '<tr class="opu-section"><td><strong>Операционная прибыль</strong></td>';
-            let totalOpProfit = 0;
-            months.forEach(m => {
-                const revenue = revenueTotal[m] || 0;
-                const cogs = costTotal[m] || 0;
-                const fixed = (adminTotal[m] || 0) + (marketingTotal[m] || 0) + (officeTotal[m] || 0) + (otherTotal[m] || 0);
-                const opProfit = revenue - cogs - fixed;
-                totalOpProfit += opProfit;
-                tbody += `<td class="${opProfit >= 0 ? 'positive' : 'negative'}"><strong>${formatMoney(opProfit)}</strong></td>`;
-            });
-            tbody += `<td class="${totalOpProfit >= 0 ? 'positive' : 'negative'}"><strong>${formatMoney(totalOpProfit)}</strong></td></tr>`;
-            
-            // Операционная рентабельность %
-            tbody += '<tr class="opu-section"><td><strong>Операционная рентабельность, %</strong></td>';
-            months.forEach(m => {
-                const revenue = revenueTotal[m] || 0;
-                const cogs = costTotal[m] || 0;
-                const fixed = (adminTotal[m] || 0) + (marketingTotal[m] || 0) + (officeTotal[m] || 0) + (otherTotal[m] || 0);
-                const opProfitPct = revenue > 0 ? ((revenue - cogs - fixed) / revenue * 100) : 0;
-                tbody += `<td>${formatPercent(opProfitPct)}</td>`;
-            });
-            const totalRevenue = Object.values(revenueTotal).reduce((s, v) => s + v, 0);
-            const avgOpProfitPct = totalRevenue > 0 ? (totalOpProfit / totalRevenue * 100) : 0;
-            tbody += `<td>${formatPercent(avgOpProfitPct)}</td></tr>`;
-            
-            // Чистая прибыль (после статей ниже операционной)
-            
-            tbody += '<tr class="opu-total"><td>Чистая прибыль</td>';
-            let totalNet = 0;
-            months.forEach(m => {
-                const net = revenueTotal[m] - costTotal[m] - adminTotal[m] - marketingTotal[m] - officeTotal[m] - otherTotal[m] + belowOpTotal[m];
-                totalNet += net;
-                tbody += `<td class="${net >= 0 ? 'positive' : 'negative'}">${formatMoney(net)}</td>`;
-            });
-            tbody += `<td class="${totalNet >= 0 ? 'positive' : 'negative'}">${formatMoney(totalNet)}</td></tr>`;
-            
             document.getElementById('opuTableBody').innerHTML = tbody;
         }
         
@@ -1714,14 +1758,16 @@
             }
 
             // Добавляем данные из calendarData по articleKey за этот месяц
+            // В ОПУ попадают ТОЛЬКО: покупки, зарплата (через revenueData), продажи (через revenue→external_staff),
+            // ручные операции (source:'manual'). Банковская выписка (source:'bank') в ОПУ НЕ попадает.
             appState.calendarData.forEach(t => {
-                if (!t.date.startsWith(monthKey)) return;
+                if (!t.date || !t.date.startsWith(monthKey)) return;
                 if (!t.articleKey) return;
-                // Пропускаем зарплатные — они уже в revenueData
+                // Пропускаем зарплатные — они уже в revenueData (fot/ndfl/pfr/fss)
                 if (t.source === 'salary') return;
                 // Пропускаем продажи — они уже через revenue→external_staff
                 if (t.source === 'sales') return;
-                // Пропускаем банковскую выписку — только в платёжный календарь
+                // Пропускаем банк — банковская выписка идёт только в реестр/календарь, не в ОПУ
                 if (t.source === 'bank') return;
 
                 if (!result[t.articleKey]) result[t.articleKey] = 0;
@@ -2224,90 +2270,81 @@
             document.querySelectorAll('#clearDataModal input[type="checkbox"]').forEach(cb => cb.checked = false);
         }
         
-        function confirmClearData() {
+        async function confirmClearData() {
             const toDelete = [];
-            
+
             if (document.getElementById('clear_calendar').checked) toDelete.push('Банковская выписка');
             if (document.getElementById('clear_revenue').checked) toDelete.push('Продажи');
             if (document.getElementById('clear_projects').checked) toDelete.push('Проекты');
             if (document.getElementById('clear_counterparties').checked) toDelete.push('Справочник контрагентов');
             if (document.getElementById('clear_plans').checked) toDelete.push('Планы');
             if (document.getElementById('clear_comments').checked) toDelete.push('Комментарии');
-            
+
             if (toDelete.length === 0) {
                 alert('Ничего не выбрано!');
                 return;
             }
-            
+
             if (!confirm(`Удалить следующие данные?\n\n${toDelete.join('\n')}\n\nЭто действие нельзя отменить!`)) {
                 return;
             }
-            
-            // Удаляем выбранные данные
-            const keysToDeleteFromSB = [];
 
+            // Собираем ключи и пустые значения для очистки
+            const toClear = [];
             if (document.getElementById('clear_calendar').checked) {
                 appState.calendarData = [];
-                localStorage.removeItem('calendarData');
-                keysToDeleteFromSB.push('calendarData');
+                toClear.push(['calendarData', JSON.stringify([])]);
             }
-            
             if (document.getElementById('clear_revenue').checked) {
                 appState.revenueData = {};
-                localStorage.removeItem('revenueData');
-                keysToDeleteFromSB.push('revenueData');
+                toClear.push(['revenueData', JSON.stringify({})]);
             }
-            
             if (document.getElementById('clear_projects').checked) {
                 appState.projectsData = [];
-                localStorage.removeItem('projectsData');
-                keysToDeleteFromSB.push('projectsData');
+                toClear.push(['projectsData', JSON.stringify([])]);
             }
-            
             if (document.getElementById('clear_counterparties').checked) {
                 appState.counterparties = [];
-                localStorage.removeItem('counterparties');
-                keysToDeleteFromSB.push('counterparties');
+                toClear.push(['counterparties', JSON.stringify([])]);
             }
-            
             if (document.getElementById('clear_plans').checked) {
                 appState.planData = [];
-                localStorage.removeItem('planData');
-                keysToDeleteFromSB.push('planData');
+                toClear.push(['planData', JSON.stringify([])]);
             }
-            
             if (document.getElementById('clear_comments').checked) {
                 appState.cellComments = {};
-                localStorage.removeItem('cellComments');
-                keysToDeleteFromSB.push('cellComments');
+                toClear.push(['cellComments', JSON.stringify({})]);
             }
 
-            // Удаляем из Supabase и ждём завершения перед перерисовкой
-            const SB_URL_DEL = 'https://nkzwwxdswourjbwyqmqy.supabase.co';
-            const SB_KEY_DEL = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5rend3eGRzd291cmpid3lxbXF5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzODI3NzksImV4cCI6MjA5MTk1ODc3OX0.P9asLiG_0cMJZ9zXc_wNGBCnfe9ysPTn_DSZA10ZtPY';
+            // Сохраняем локально сразу (origSetItem в обёртке синхронен)
+            toClear.forEach(([k, v]) => localStorage.setItem(k, v));
 
-            const deletePromises = keysToDeleteFromSB.map(key =>
-                fetch(SB_URL_DEL + '/rest/v1/finance_data?key=eq.' + key, {
-                    method: 'DELETE',
-                    headers: { 'apikey': SB_KEY_DEL, 'Authorization': 'Bearer ' + SB_KEY_DEL }
-                }).catch(() => {})
-            );
+            // Ждём, пока пустые значения улетят в Supabase — иначе после перезагрузки
+            // облако вернёт старые данные
+            if (window.sbSet) {
+                try {
+                    await Promise.all(toClear.map(([k, v]) => window.sbSet(k, v)));
+                } catch(e) {
+                    console.warn('Supabase clear error:', e);
+                }
+            }
 
-            // Закрываем модалку сразу
+            // Пересчитываем производные данные
+            recalcDerivedData();
+
+            // Закрываем модалку
             closeClearDataModal();
 
-            // Ждём удаления из Supabase, потом перерисовываем
-            Promise.all(deletePromises).then(() => {
-                recalcDerivedData();
-                updateDashboard();
-                updateOPU();
-                updateCalendar();
-                updateUnitEconomics();
-                updateRegistry();
-                updateAnalytics();
-                renderCounterparties();
-                alert(`Удалено: ${toDelete.join(', ')}`);
-            });
+            // Обновляем ВСЕ вкладки
+            updateDashboard();
+            updateOPU();
+            updateCalendar();
+            updateUnitEconomics();
+            updateRegistry();
+            updateAnalytics();
+            renderCounterparties();
+
+            alert(`Удалено: ${toDelete.join(', ')}\n\nДанные синхронизированы с облаком.`);
         }
         
         function switchUploadTab(tabName) {
@@ -3219,9 +3256,22 @@
                 !excludedKeys.includes(a.key)
             );
             
+            // Опции статей для массового селекта
+            const bulkOptions = articles.map(a => `<option value="${a.key}">${a.name}</option>`).join('');
+
             let html = `
                 <h4>Загружено операций: ${bankOps.length}</h4>
                 ${undistributed.length > 0 ? `<p style="color: #dc3545; font-weight: 600;">⚠️ Нераспределено: ${undistributed.length}</p>` : ''}
+                <div style="margin:12px 0; padding:12px; background:#f0f7ff; border-radius:8px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                    <span style="font-weight:600; font-size:13px;">Массовое распределение:</span>
+                    <select id="bankBulkArticle" style="padding:6px; font-size:13px; min-width:220px;">
+                        <option value="">— Выберите статью —</option>
+                        ${bulkOptions}
+                    </select>
+                    <button class="btn btn-small" onclick="applyBulkBankArticle()" style="padding:6px 12px;">Применить к выбранным</button>
+                    <button class="btn btn-small" onclick="applyBulkBankArticleToAll()" style="padding:6px 12px;">Применить ко всем нераспределённым</button>
+                    <button class="btn btn-small btn-secondary" onclick="reapplyCounterpartyDirectory()" style="padding:6px 12px;" title="Повторно применить справочник контрагентов">🔄 Применить справочник</button>
+                </div>
                 <div class="table-scroll" style="max-height: 400px;">
                     <table>
                         <thead>
@@ -3240,16 +3290,6 @@
                         <tbody>
             `;
             
-            // Автоподстановка статей из справочника контрагентов
-            bankOps.forEach(op => {
-                if (!op.articleKey && op.counterparty) {
-                    const cp = appState.counterparties && appState.counterparties.find(c => 
-                        c.name && c.name.toLowerCase().trim() === op.counterparty.toLowerCase().trim()
-                    );
-                    if (cp && cp.article) op.articleKey = cp.article;
-                }
-            });
-
             bankOps.forEach((op, index) => {
                 const isIncome = op.credit > 0;
                 const amount = isIncome ? op.credit : op.debit;
@@ -3287,12 +3327,7 @@
                         </tbody>
                     </table>
                 </div>
-                <div style="margin-top: 20px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                    <select id="bulkArticleSelect" style="padding: 8px; border-radius: 6px; border: 1px solid #ccc; font-size: 13px; min-width: 200px;">
-                        <option value="">— Назначить статью выбранным —</option>
-                        ${articles.map(a => '<option value="' + a.key + '">' + a.name + '</option>').join('')}
-                    </select>
-                    <button class="btn" onclick="bulkAssignArticle()" style="background: #0066CC; color: white;">✅ Назначить выбранным</button>
+                <div style="margin-top: 20px; display: flex; gap: 10px; align-items: center;">
                     <button class="btn" onclick="deleteSelectedBankOps()" style="background: #dc3545; color: white;">🗑️ Удалить выбранные</button>
                     <button class="btn" onclick="applyBankData()">Применить</button>
                     <button class="btn btn-secondary" onclick="cancelBankUpload()">Отмена</button>
@@ -3338,53 +3373,82 @@
             }
         }
         
-        function bulkAssignArticle() {
-            const articleKey = document.getElementById('bulkArticleSelect').value;
-            if (!articleKey) { alert('Выберите статью для назначения'); return; }
-            const checkboxes = document.querySelectorAll('.bank-op-checkbox:checked');
-            if (checkboxes.length === 0) { alert('Выберите операции'); return; }
-            checkboxes.forEach(cb => {
-                const index = parseInt(cb.dataset.index);
-                if (window.pendingBankData && window.pendingBankData[index]) {
-                    window.pendingBankData[index].articleKey = articleKey;
-                    const row = document.getElementById(`bank-op-${index}`);
-                    if (row) {
-                        row.style.background = '';
-                        const select = row.querySelector('select');
-                        if (select) select.value = articleKey;
-                    }
-                }
-            });
-            // Обновляем счётчик нераспределённых
-            const undistributed = window.pendingBankData.filter(op => !op.articleKey);
-            const warning = document.querySelector('#bankPreview p[style*="color: #dc3545"]');
-            if (warning) {
-                if (undistributed.length > 0) warning.textContent = `⚠️ Нераспределено: ${undistributed.length}`;
-                else warning.remove();
-            }
-        }
-
         function deleteSelectedBankOps() {
             const checkboxes = document.querySelectorAll('.bank-op-checkbox:checked');
             if (checkboxes.length === 0) {
                 alert('Выберите операции для удаления');
                 return;
             }
-            
+
             if (!confirm(`Удалить ${checkboxes.length} операций?`)) {
                 return;
             }
-            
+
             // Собираем индексы для удаления (в обратном порядке)
             const indices = Array.from(checkboxes).map(cb => parseInt(cb.dataset.index)).sort((a, b) => b - a);
-            
+
             // Удаляем из массива
             indices.forEach(index => {
                 window.pendingBankData.splice(index, 1);
             });
-            
+
             // Перерисовываем
             showBankPreview(window.pendingBankData);
+        }
+
+        // === МАССОВОЕ РАСПРЕДЕЛЕНИЕ СТАТЬИ В ПРЕДПРОСМОТРЕ БАНКА ===
+
+        function applyBulkBankArticle() {
+            const sel = document.getElementById('bankBulkArticle');
+            if (!sel || !sel.value) { alert('Выберите статью'); return; }
+            const articleKey = sel.value;
+
+            const checkboxes = document.querySelectorAll('.bank-op-checkbox:checked');
+            if (checkboxes.length === 0) { alert('Отметьте операции галочками'); return; }
+
+            const indices = Array.from(checkboxes).map(cb => parseInt(cb.dataset.index));
+            indices.forEach(i => {
+                if (window.pendingBankData && window.pendingBankData[i]) {
+                    window.pendingBankData[i].articleKey = articleKey;
+                }
+            });
+
+            showBankPreview(window.pendingBankData);
+            alert(`Статья применена к ${indices.length} операциям`);
+        }
+
+        function applyBulkBankArticleToAll() {
+            const sel = document.getElementById('bankBulkArticle');
+            if (!sel || !sel.value) { alert('Выберите статью'); return; }
+            const articleKey = sel.value;
+
+            if (!window.pendingBankData) return;
+            let count = 0;
+            window.pendingBankData.forEach(op => {
+                if (!op.articleKey) { op.articleKey = articleKey; count++; }
+            });
+
+            showBankPreview(window.pendingBankData);
+            alert(`Статья применена к ${count} нераспределённым операциям`);
+        }
+
+        function reapplyCounterpartyDirectory() {
+            if (!window.pendingBankData) return;
+            let matched = 0;
+            window.pendingBankData.forEach(op => {
+                // Применяем справочник: если у контрагента есть статья — ставим её (перезаписываем)
+                const artFromCp = matchArticleByCounterparty(op.counterparty);
+                if (artFromCp) {
+                    op.articleKey = artFromCp;
+                    matched++;
+                } else if (!op.articleKey) {
+                    // Если не нашли в справочнике и нет статьи — пробуем по ключевым словам
+                    const artFromKw = matchArticleByKeywords(op.purpose, op.counterparty);
+                    if (artFromKw) { op.articleKey = artFromKw; matched++; }
+                }
+            });
+            showBankPreview(window.pendingBankData);
+            alert(`Справочник применён: обновлено ${matched} операций`);
         }
         
         function showUndistributedModal() {
@@ -3461,11 +3525,14 @@
             
             // Сохраняем
             localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
-            
-            // Обновляем календарь
+
+            // Обновляем все вкладки (банк НЕ попадает в ОПУ, но отражается в календаре и реестре)
             updateCalendar();
-            
-            alert(`Загружено ${addedCount} операций в платежный календарь!`);
+            updateRegistry();
+            updateDashboard();
+            updateAnalytics();
+
+            alert(`Загружено ${addedCount} операций в платежный календарь!\n\nБанковская выписка отображается в реестре и календаре, но НЕ учитывается в ОПУ (в ОПУ попадают только покупки, зарплата, продажи и ручные операции).`);
             
             // Очищаем
             window.pendingBankData = null;
@@ -3941,6 +4008,8 @@
                 // Определяем статью по контрагенту из справочника
                 const matchedCp = findCounterpartyMatch(op.counterparty);
                 const artKey = (matchedCp && matchedCp.article) ? matchedCp.article : 'external_staff';
+                // Определяем проект: либо из справочника, либо имя контрагента
+                const projName = (matchedCp && matchedCp.project) ? matchedCp.project : op.counterparty;
 
                 appState.calendarData.push({
                     date: op.date,
@@ -3949,21 +4018,25 @@
                     counterparty: op.counterparty,
                     purpose: 'Продажа',
                     source: 'sales',
-                    articleKey: artKey
+                    articleKey: artKey,
+                    project: projName
                 });
             });
-            
+
             console.log('Added sales to calendarData, total:', appState.calendarData.length);
-            
+
             // Сохраняем
             localStorage.setItem('revenueData', JSON.stringify(appState.revenueData));
             localStorage.setItem('projectsData', JSON.stringify(appState.projectsData));
             localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
-            
-            // Обновляем ОПУ и проекты
+
+            // Обновляем все вкладки
             updateOPU();
             updateUnitEconomics();
-            updateRegistry(); // Обновляем реестр!
+            updateDashboard();
+            updateCalendar();
+            updateRegistry();
+            updateAnalytics();
             
             const monthsCount = Object.keys(revenueByMonth).length;
             const totalRevenue = Object.values(revenueByMonth).reduce((sum, val) => sum + val, 0);
@@ -4757,13 +4830,13 @@
         
         function applyPurchasesData() {
             if (!window.pendingPurchasesData) return;
-            
+
             const purchasesOps = window.pendingPurchasesData;
-            
+
             // Проверяем что все статьи выбраны
             for (let i = 0; i < purchasesOps.length; i++) {
                 const op = purchasesOps[i];
-                
+
                 if (!op.matchedArticle) {
                     // Берем из выпадающего списка
                     const select = document.getElementById(`purchase-article-${i}`);
@@ -4774,52 +4847,41 @@
                     op.matchedArticle = select.value;
                 }
             }
-            
-            // Группируем по месяцам и статьям
-            const dataByMonth = {};
-            
+
+            // Добавляем покупки в calendarData (для реестра и ОПУ)
+            if (!appState.calendarData) appState.calendarData = [];
+
+            const monthsSet = new Set();
             purchasesOps.forEach(op => {
-                const date = new Date(op.date);
-                const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-                
-                if (!dataByMonth[monthKey]) {
-                    dataByMonth[monthKey] = {};
-                }
-                
-                if (!dataByMonth[monthKey][op.matchedArticle]) {
-                    dataByMonth[monthKey][op.matchedArticle] = 0;
-                }
-                
-                dataByMonth[monthKey][op.matchedArticle] += op.amount;
-            });
-            
-            // Обновляем данные в appState
-            if (!appState.revenueData) {
-                appState.revenueData = {};
-            }
-            
-            Object.keys(dataByMonth).forEach(monthKey => {
-                if (!appState.revenueData[monthKey]) {
-                    appState.revenueData[monthKey] = {};
-                }
-                
-                Object.keys(dataByMonth[monthKey]).forEach(articleKey => {
-                    const currentValue = appState.revenueData[monthKey][articleKey] || 0;
-                    appState.revenueData[monthKey][articleKey] = currentValue + dataByMonth[monthKey][articleKey];
+                const artDef = appState.articles.find(a => a.key === op.matchedArticle);
+                const purposeText = artDef ? artDef.name : 'Покупка';
+                monthsSet.add(op.date.substring(0, 7));
+                appState.calendarData.push({
+                    date: op.date,
+                    type: 'expense',
+                    amount: op.amount,
+                    counterparty: (op.counterparty || '').toString().trim(),
+                    purpose: purposeText,
+                    source: 'purchases',
+                    articleKey: op.matchedArticle
                 });
             });
-            
+
             // Сохраняем
-            localStorage.setItem('revenueData', JSON.stringify(appState.revenueData));
-            
-            // Обновляем ОПУ
+            localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
+
+            // Обновляем все вкладки
             updateOPU();
-            
-            const monthsCount = Object.keys(dataByMonth).length;
+            updateCalendar();
+            updateDashboard();
+            updateRegistry();
+            updateUnitEconomics();
+
+            const monthsCount = monthsSet.size;
             const totalExpense = purchasesOps.reduce((sum, op) => sum + op.amount, 0);
-            
+
             alert(`Загружено ${purchasesOps.length} покупок\nРасходы: ${totalExpense.toLocaleString('ru-RU')} ₽\nЗа ${monthsCount} месяц(ев)\n\nРаспределено по статьям ОПУ`);
-            
+
             // Очищаем
             window.pendingPurchasesData = null;
             document.getElementById('purchasesFile').value = '';
@@ -5689,7 +5751,7 @@
 
             transactions.sort((a, b) => b.date.localeCompare(a.date));
 
-            const sourceLabels = { bank: 'Банк', sales: 'Продажи', salary: 'Зарплата', purchases: 'Покупки' };
+            const sourceLabels = { bank: 'Банк', sales: 'Продажи', salary: 'Зарплата', purchases: 'Покупки', manual: 'Вручную' };
             const regExcluded = ['fot', 'ndfl', 'pfr', 'fss', 'office_fot', 'office_ndfl', 'office_pfr', 'office_fss'];
             const regArticles = appState.articles.filter(a => a.key && !a.section && !a.subsection && !regExcluded.includes(a.key));
 
@@ -6413,10 +6475,26 @@
 
         // === Внесение операции из ОПУ ===
         function addManualOperation() {
-            const excludedKeys = ['fot','ndfl','pfr','fss','office_fot','office_ndfl','office_pfr','office_fss'];
-            const articles = appState.articles.filter(a => a.key && !a.section && !a.subsection && !excludedKeys.includes(a.key));
+            const typeChoice = prompt(
+                'Тип операции:\n\n' +
+                '1. Обычная операция (доход/расход по любой статье)\n' +
+                '2. Зарплата производственных сотрудников (ФОТ, НДФЛ, ПФР, ФСС)\n' +
+                '3. Зарплата офисных сотрудников (ФОТ, НДФЛ, ПФР, ФСС)\n\n' +
+                'Введите номер:',
+                '1'
+            );
+            if (!typeChoice) return;
 
-            // Собираем статьи по секциям для удобного выбора
+            const typeIdx = parseInt(typeChoice);
+
+            if (typeIdx === 2 || typeIdx === 3) {
+                addManualSalary(typeIdx === 3);
+                return;
+            }
+
+            // === ОБЫЧНАЯ ОПЕРАЦИЯ ===
+            const excludedKeys = ['fot','ndfl','pfr','fss','office_fot','office_ndfl','office_pfr','office_fss'];
+
             let artList = '';
             let curSection = '';
             let artFlatList = [];
@@ -6450,7 +6528,7 @@
                 amount,
                 counterparty: counterparty.trim(),
                 purpose: purpose.trim(),
-                source: 'bank',
+                source: 'manual',
                 articleKey: article.key
             });
 
@@ -6460,8 +6538,69 @@
             updateCalendar();
             updateDashboard();
             updateRegistry();
+            updateUnitEconomics();
 
             alert(`Операция добавлена:\n${article.name} — ${amount.toLocaleString('ru-RU')} ₽\n${dateStr}`);
+        }
+
+        function addManualSalary(isOffice) {
+            const label = isOffice ? 'офисных сотрудников' : 'производственных сотрудников';
+            const prefix = isOffice ? 'office_' : '';
+
+            const dateStr = prompt(
+                `Зарплата ${label} — дата операции (ГГГГ-ММ-01 = первое число месяца):`,
+                new Date().toISOString().substring(0, 7) + '-01'
+            );
+            if (!dateStr) return;
+
+            const fot = parseFloat(prompt('ФОТ (к выплате), ₽:', '0')) || 0;
+            const ndfl = parseFloat(prompt('НДФЛ, ₽:', '0')) || 0;
+            const pfr = parseFloat(prompt('Страховые взносы ПФР, ₽:', '0')) || 0;
+            const fss = parseFloat(prompt('Страховые взносы ФСС, ₽:', '0')) || 0;
+
+            if (fot + ndfl + pfr + fss <= 0) { alert('Все суммы нулевые'); return; }
+
+            const counterparty = prompt('Контрагент (проект/подразделение):', isOffice ? 'Офис' : '') || (isOffice ? 'Офис' : '');
+            const proj = counterparty.trim() || (isOffice ? 'Офис' : '');
+
+            if (!appState.calendarData) appState.calendarData = [];
+
+            const addRow = (amount, key, name) => {
+                if (amount <= 0) return;
+                appState.calendarData.push({
+                    date: dateStr,
+                    type: 'expense',
+                    amount,
+                    counterparty: proj,
+                    purpose: `${name} — ${proj}`,
+                    source: 'manual',
+                    articleKey: key,
+                    project: proj
+                });
+            };
+
+            addRow(fot, prefix + 'fot', 'ФОТ (к выплате)');
+            addRow(ndfl, prefix + 'ndfl', 'НДФЛ');
+            addRow(pfr, prefix + 'pfr', 'ПФР');
+            addRow(fss, prefix + 'fss', 'ФСС');
+
+            localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
+            recalcDerivedData();
+            updateOPU();
+            updateCalendar();
+            updateDashboard();
+            updateRegistry();
+            updateUnitEconomics();
+
+            const total = fot + ndfl + pfr + fss;
+            alert(
+                `Зарплата ${label} добавлена:\n` +
+                `ФОТ: ${fot.toLocaleString('ru-RU')} ₽\n` +
+                `НДФЛ: ${ndfl.toLocaleString('ru-RU')} ₽\n` +
+                `ПФР: ${pfr.toLocaleString('ru-RU')} ₽\n` +
+                `ФСС: ${fss.toLocaleString('ru-RU')} ₽\n` +
+                `Итого: ${total.toLocaleString('ru-RU')} ₽\n${dateStr}`
+            );
         }
 
         // === П.4 Карточка проекта: управление контрагентами ===
