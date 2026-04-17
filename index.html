@@ -44,53 +44,8 @@
           rows.forEach(row => {
             if(!row.key || row.content === null) return;
 
-            // Умное слияние: для массивов (calendarData, projectsData, planData) — объединяем уникальные элементы
-            // Для объектов (revenueData, cellComments) — глубокое слияние
-            const localRaw = localStorage.getItem(row.key);
-
-            if(row.key === 'calendarData' || row.key === 'projectsData' || row.key === 'planData'){
-              try {
-                const sbArr = JSON.parse(row.content) || [];
-                const localArr = JSON.parse(localRaw || '[]') || [];
-                // Merge: items from local that are not in SB (by id), plus all SB items
-                const sbIds = new Set(sbArr.map(x => x.id).filter(Boolean));
-                const localOnly = localArr.filter(x => x.id && !sbIds.has(x.id));
-                const merged = [...sbArr, ...localOnly];
-                origSet(row.key, JSON.stringify(merged));
-              } catch(e){ origSet(row.key, row.content); }
-            } else if(row.key === 'revenueData'){
-              try {
-                const sbObj = JSON.parse(row.content) || {};
-                const localObj = JSON.parse(localRaw || '{}') || {};
-                // Deep merge revenueData: { "2026-01": { fot: 0, revenue: 100, ... }, ... }
-                const merged = Object.assign({}, localObj);
-                Object.entries(sbObj).forEach(([month, sbMonthData]) => {
-                  if(!merged[month]){
-                    merged[month] = sbMonthData;
-                  } else {
-                    // Merge month-level keys: take max value (whichever is non-zero)
-                    merged[month] = Object.assign({}, merged[month]);
-                    Object.entries(sbMonthData).forEach(([k, v]) => {
-                      if(v && !merged[month][k]) merged[month][k] = v;
-                      else if(v && merged[month][k]) merged[month][k] = Math.max(merged[month][k], v);
-                    });
-                  }
-                });
-                origSet(row.key, JSON.stringify(merged));
-              } catch(e){ origSet(row.key, row.content); }
-            } else if(row.key === 'cellComments' || row.key === 'collapsedSections'){
-              try {
-                const sbObj = JSON.parse(row.content) || {};
-                const localObj = JSON.parse(localRaw || '{}') || {};
-                const merged = Object.assign({}, sbObj,
-                  Object.fromEntries(Object.entries(localObj).filter(([k]) => !(k in sbObj)))
-                );
-                origSet(row.key, JSON.stringify(merged));
-              } catch(e){ origSet(row.key, row.content); }
-            } else {
-              // Для остальных (articles, planData и пр.) — берём из Supabase
-              origSet(row.key, row.content);
-            }
+            // Supabase — источник правды. Просто перезаписываем localStorage.
+            origSet(row.key, row.content);
             loaded = true;
           });
 
@@ -2327,32 +2282,32 @@
                 keysToDeleteFromSB.push('cellComments');
             }
 
-            // Удаляем из Supabase
+            // Удаляем из Supabase и ждём завершения перед перерисовкой
             const SB_URL_DEL = 'https://nkzwwxdswourjbwyqmqy.supabase.co';
             const SB_KEY_DEL = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5rend3eGRzd291cmpid3lxbXF5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzODI3NzksImV4cCI6MjA5MTk1ODc3OX0.P9asLiG_0cMJZ9zXc_wNGBCnfe9ysPTn_DSZA10ZtPY';
-            keysToDeleteFromSB.forEach(key => {
+
+            const deletePromises = keysToDeleteFromSB.map(key =>
                 fetch(SB_URL_DEL + '/rest/v1/finance_data?key=eq.' + key, {
                     method: 'DELETE',
                     headers: { 'apikey': SB_KEY_DEL, 'Authorization': 'Bearer ' + SB_KEY_DEL }
-                }).catch(() => {});
-            });
-            
-            // Пересчитываем производные данные после удаления
-            recalcDerivedData();
+                }).catch(() => {})
+            );
 
-            // Закрываем модалку
+            // Закрываем модалку сразу
             closeClearDataModal();
 
-            // Обновляем ВСЕ вкладки
-            updateDashboard();
-            updateOPU();
-            updateCalendar();
-            updateUnitEconomics();
-            updateRegistry();
-            updateAnalytics();
-            renderCounterparties();
-
-            alert(`Удалено: ${toDelete.join(', ')}`);
+            // Ждём удаления из Supabase, потом перерисовываем
+            Promise.all(deletePromises).then(() => {
+                recalcDerivedData();
+                updateDashboard();
+                updateOPU();
+                updateCalendar();
+                updateUnitEconomics();
+                updateRegistry();
+                updateAnalytics();
+                renderCounterparties();
+                alert(`Удалено: ${toDelete.join(', ')}`);
+            });
         }
         
         function switchUploadTab(tabName) {
