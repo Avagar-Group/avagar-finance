@@ -1766,6 +1766,8 @@
                 if (t.source === 'salary') return;
                 // Пропускаем продажи — они уже через revenue→external_staff
                 if (t.source === 'sales') return;
+                // Пропускаем банковскую выписку — только в платёжный календарь
+                if (t.source === 'bank') return;
 
                 if (!result[t.articleKey]) result[t.articleKey] = 0;
                 result[t.articleKey] += t.amount || 0;
@@ -3283,6 +3285,16 @@
                         <tbody>
             `;
             
+            // Автоподстановка статей из справочника контрагентов
+            bankOps.forEach(op => {
+                if (!op.articleKey && op.counterparty) {
+                    const cp = appState.counterparties && appState.counterparties.find(c => 
+                        c.name && c.name.toLowerCase().trim() === op.counterparty.toLowerCase().trim()
+                    );
+                    if (cp && cp.article) op.articleKey = cp.article;
+                }
+            });
+
             bankOps.forEach((op, index) => {
                 const isIncome = op.credit > 0;
                 const amount = isIncome ? op.credit : op.debit;
@@ -3320,7 +3332,12 @@
                         </tbody>
                     </table>
                 </div>
-                <div style="margin-top: 20px; display: flex; gap: 10px; align-items: center;">
+                <div style="margin-top: 20px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                    <select id="bulkArticleSelect" style="padding: 8px; border-radius: 6px; border: 1px solid #ccc; font-size: 13px; min-width: 200px;">
+                        <option value="">— Назначить статью выбранным —</option>
+                        ${articles.map(a => '<option value="' + a.key + '">' + a.name + '</option>').join('')}
+                    </select>
+                    <button class="btn" onclick="bulkAssignArticle()" style="background: #0066CC; color: white;">✅ Назначить выбранным</button>
                     <button class="btn" onclick="deleteSelectedBankOps()" style="background: #dc3545; color: white;">🗑️ Удалить выбранные</button>
                     <button class="btn" onclick="applyBankData()">Применить</button>
                     <button class="btn btn-secondary" onclick="cancelBankUpload()">Отмена</button>
@@ -3366,6 +3383,32 @@
             }
         }
         
+        function bulkAssignArticle() {
+            const articleKey = document.getElementById('bulkArticleSelect').value;
+            if (!articleKey) { alert('Выберите статью для назначения'); return; }
+            const checkboxes = document.querySelectorAll('.bank-op-checkbox:checked');
+            if (checkboxes.length === 0) { alert('Выберите операции'); return; }
+            checkboxes.forEach(cb => {
+                const index = parseInt(cb.dataset.index);
+                if (window.pendingBankData && window.pendingBankData[index]) {
+                    window.pendingBankData[index].articleKey = articleKey;
+                    const row = document.getElementById(`bank-op-${index}`);
+                    if (row) {
+                        row.style.background = '';
+                        const select = row.querySelector('select');
+                        if (select) select.value = articleKey;
+                    }
+                }
+            });
+            // Обновляем счётчик нераспределённых
+            const undistributed = window.pendingBankData.filter(op => !op.articleKey);
+            const warning = document.querySelector('#bankPreview p[style*="color: #dc3545"]');
+            if (warning) {
+                if (undistributed.length > 0) warning.textContent = `⚠️ Нераспределено: ${undistributed.length}`;
+                else warning.remove();
+            }
+        }
+
         function deleteSelectedBankOps() {
             const checkboxes = document.querySelectorAll('.bank-op-checkbox:checked');
             if (checkboxes.length === 0) {
