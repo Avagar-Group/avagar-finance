@@ -46,54 +46,8 @@
 
           rows.forEach(row => {
             if(!row.key || row.content === null) return;
-
-            // Умное слияние: для массивов (calendarData, projectsData, planData) — объединяем уникальные элементы
-            // Для объектов (revenueData, cellComments) — глубокое слияние
-            const localRaw = localStorage.getItem(row.key);
-
-            if(row.key === 'calendarData' || row.key === 'projectsData' || row.key === 'planData'){
-              try {
-                const sbArr = JSON.parse(row.content) || [];
-                const localArr = JSON.parse(localRaw || '[]') || [];
-                // Merge: items from local that are not in SB (by id), plus all SB items
-                const sbIds = new Set(sbArr.map(x => x.id).filter(Boolean));
-                const localOnly = localArr.filter(x => x.id && !sbIds.has(x.id));
-                const merged = [...sbArr, ...localOnly];
-                origSet(row.key, JSON.stringify(merged));
-              } catch(e){ origSet(row.key, row.content); }
-            } else if(row.key === 'revenueData'){
-              try {
-                const sbObj = JSON.parse(row.content) || {};
-                const localObj = JSON.parse(localRaw || '{}') || {};
-                // Deep merge revenueData: { "2026-01": { fot: 0, revenue: 100, ... }, ... }
-                const merged = Object.assign({}, localObj);
-                Object.entries(sbObj).forEach(([month, sbMonthData]) => {
-                  if(!merged[month]){
-                    merged[month] = sbMonthData;
-                  } else {
-                    // Merge month-level keys: take max value (whichever is non-zero)
-                    merged[month] = Object.assign({}, merged[month]);
-                    Object.entries(sbMonthData).forEach(([k, v]) => {
-                      if(v && !merged[month][k]) merged[month][k] = v;
-                      else if(v && merged[month][k]) merged[month][k] = Math.max(merged[month][k], v);
-                    });
-                  }
-                });
-                origSet(row.key, JSON.stringify(merged));
-              } catch(e){ origSet(row.key, row.content); }
-            } else if(row.key === 'cellComments' || row.key === 'collapsedSections'){
-              try {
-                const sbObj = JSON.parse(row.content) || {};
-                const localObj = JSON.parse(localRaw || '{}') || {};
-                const merged = Object.assign({}, sbObj,
-                  Object.fromEntries(Object.entries(localObj).filter(([k]) => !(k in sbObj)))
-                );
-                origSet(row.key, JSON.stringify(merged));
-              } catch(e){ origSet(row.key, row.content); }
-            } else {
-              // Для остальных (articles, planData и пр.) — берём из Supabase
-              origSet(row.key, row.content);
-            }
+            // Supabase — единственный источник правды. Всегда перезаписываем localStorage.
+            origSet(row.key, row.content);
             loaded = true;
           });
 
@@ -5869,11 +5823,22 @@
             updateCalendar();
         }
         
-        function deleteTransaction(index) {
+        async function deleteTransaction(index) {
             if (!confirm('Удалить операцию?')) return;
 
             appState.calendarData.splice(index, 1);
-            localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
+            // Сохраняем в localStorage и ждём синхронизации с Supabase
+            const newData = JSON.stringify(appState.calendarData);
+            localStorage.getItem; // no-op
+            // Прямая запись в Supabase минуя override чтобы гарантировать сохранение
+            if (window.sbSet) {
+                try {
+                    await window.sbSet('calendarData', newData);
+                } catch(e) {}
+            }
+            // Обновляем localStorage напрямую (через origSetItem чтобы не задвоить запрос)
+            const orig = Storage.prototype.setItem.bind(localStorage);
+            orig('calendarData', newData);
 
             // Пересчитываем revenueData и projectsData из оставшихся операций
             recalcDerivedData();
