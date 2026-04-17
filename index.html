@@ -2596,7 +2596,7 @@
             `;
             
             // Группируем статьи по секциям (исключаем детали Себестоимости и Офисных)
-            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss', 'office_fot', 'office_ndfl', 'office_pfr', 'office_fss'];
+            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss'];
             const sections = {};
             let currentSection = '';
             
@@ -2755,7 +2755,7 @@
             `;
             
             // Собираем список статей для dropdown
-            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss', 'office_fot', 'office_ndfl', 'office_pfr', 'office_fss'];
+            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss'];
             const articleSections = {};
             let curSec = '';
             appState.articles.forEach(a => {
@@ -3168,7 +3168,7 @@
             const undistributed = bankOps.filter(op => !op.articleKey);
             
             // Список статей для выбора
-            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss', 'office_fot', 'office_ndfl', 'office_pfr', 'office_fss'];
+            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss'];
             const articles = appState.articles.filter(a => 
                 a.key && 
                 !a.section && 
@@ -3312,7 +3312,7 @@
             }
             
             // Фильтруем статьи - только те что могут быть в банке
-            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss', 'office_fot', 'office_ndfl', 'office_pfr', 'office_fss'];
+            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss'];
             const articles = appState.articles.filter(a => 
                 a.key && 
                 !a.section && 
@@ -3408,7 +3408,7 @@
             if (transactions.length === 0) return;
 
             // Список статей для выбора (исключаем нераспределённые и группы)
-            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss', 'office_fot', 'office_ndfl', 'office_pfr', 'office_fss', 'unallocated_income', 'unallocated_expense'];
+            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss', 'unallocated_income', 'unallocated_expense'];
             const isIncome = articleKey === 'unallocated_income';
             const availableArticles = appState.articles.filter(a =>
                 a.key &&
@@ -4604,7 +4604,7 @@
             });
             
             // Получаем список расходных статей (исключаем детали Себестоимости и Офисных)
-            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss', 'office_fot', 'office_ndfl', 'office_pfr', 'office_fss'];
+            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss'];
             const expenseArticles = appState.articles.filter(a => 
                 !a.section && 
                 a.type === 'expense' && 
@@ -5690,7 +5690,7 @@
             if (newPurpose === null) return;
 
             // Список статей для выбора
-            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss', 'office_fot', 'office_ndfl', 'office_pfr', 'office_fss'];
+            const excludedKeys = ['fot', 'ndfl', 'pfr', 'fss'];
             const articles = appState.articles.filter(a => a.key && !a.section && !a.subsection && !excludedKeys.includes(a.key));
             const articlesList = articles.map((a, i) => `${i + 1}. ${a.name}`).join('\n');
             const currentArticle = appState.articles.find(a => a.key === transaction.articleKey);
