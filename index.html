@@ -58,12 +58,31 @@
                 const merged = [...sbArr, ...localOnly];
                 origSet(row.key, JSON.stringify(merged));
               } catch(e){ origSet(row.key, row.content); }
-            } else if(row.key === 'revenueData' || row.key === 'cellComments' || row.key === 'collapsedSections'){
+            } else if(row.key === 'revenueData'){
               try {
                 const sbObj = JSON.parse(row.content) || {};
                 const localObj = JSON.parse(localRaw || '{}') || {};
-                // Deep merge: local wins for keys not in SB
-                const merged = Object.assign({}, sbObj, 
+                // Deep merge revenueData: { "2026-01": { fot: 0, revenue: 100, ... }, ... }
+                const merged = Object.assign({}, localObj);
+                Object.entries(sbObj).forEach(([month, sbMonthData]) => {
+                  if(!merged[month]){
+                    merged[month] = sbMonthData;
+                  } else {
+                    // Merge month-level keys: take max value (whichever is non-zero)
+                    merged[month] = Object.assign({}, merged[month]);
+                    Object.entries(sbMonthData).forEach(([k, v]) => {
+                      if(v && !merged[month][k]) merged[month][k] = v;
+                      else if(v && merged[month][k]) merged[month][k] = Math.max(merged[month][k], v);
+                    });
+                  }
+                });
+                origSet(row.key, JSON.stringify(merged));
+              } catch(e){ origSet(row.key, row.content); }
+            } else if(row.key === 'cellComments' || row.key === 'collapsedSections'){
+              try {
+                const sbObj = JSON.parse(row.content) || {};
+                const localObj = JSON.parse(localRaw || '{}') || {};
+                const merged = Object.assign({}, sbObj,
                   Object.fromEntries(Object.entries(localObj).filter(([k]) => !(k in sbObj)))
                 );
                 origSet(row.key, JSON.stringify(merged));
