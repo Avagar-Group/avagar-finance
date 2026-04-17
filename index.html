@@ -2287,35 +2287,53 @@
             }
             
             // Удаляем выбранные данные
+            const keysToDeleteFromSB = [];
+
             if (document.getElementById('clear_calendar').checked) {
                 appState.calendarData = [];
                 localStorage.removeItem('calendarData');
+                keysToDeleteFromSB.push('calendarData');
             }
             
             if (document.getElementById('clear_revenue').checked) {
                 appState.revenueData = {};
                 localStorage.removeItem('revenueData');
+                keysToDeleteFromSB.push('revenueData');
             }
             
             if (document.getElementById('clear_projects').checked) {
                 appState.projectsData = [];
                 localStorage.removeItem('projectsData');
+                keysToDeleteFromSB.push('projectsData');
             }
             
             if (document.getElementById('clear_counterparties').checked) {
                 appState.counterparties = [];
                 localStorage.removeItem('counterparties');
+                keysToDeleteFromSB.push('counterparties');
             }
             
             if (document.getElementById('clear_plans').checked) {
                 appState.planData = [];
                 localStorage.removeItem('planData');
+                keysToDeleteFromSB.push('planData');
             }
             
             if (document.getElementById('clear_comments').checked) {
                 appState.cellComments = {};
                 localStorage.removeItem('cellComments');
+                keysToDeleteFromSB.push('cellComments');
             }
+
+            // Удаляем из Supabase
+            const SB_URL_DEL = 'https://nkzwwxdswourjbwyqmqy.supabase.co';
+            const SB_KEY_DEL = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5rend3eGRzd291cmpid3lxbXF5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzODI3NzksImV4cCI6MjA5MTk1ODc3OX0.P9asLiG_0cMJZ9zXc_wNGBCnfe9ysPTn_DSZA10ZtPY';
+            keysToDeleteFromSB.forEach(key => {
+                fetch(SB_URL_DEL + '/rest/v1/finance_data?key=eq.' + key, {
+                    method: 'DELETE',
+                    headers: { 'apikey': SB_KEY_DEL, 'Authorization': 'Bearer ' + SB_KEY_DEL }
+                }).catch(() => {});
+            });
             
             // Пересчитываем производные данные после удаления
             recalcDerivedData();
