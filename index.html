@@ -33,67 +33,28 @@
     };
 
     // On load: fetch all data from Supabase, populate localStorage, then reload appState
+    // Стратегия: Supabase — источник истины (every localStorage.setItem записывает в SB).
+    // Если в SB несколько строк на один ключ, берём самую свежую по updated_at.
     window.addEventListener('DOMContentLoaded', async function(){
       document.body.insertAdjacentHTML('afterbegin',
         '<div id="sb-loading" style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#0066CC;color:#fff;text-align:center;padding:10px;font-family:sans-serif;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,.2)">⏳ Загрузка данных из облака...</div>'
       );
       try {
-        const r = await fetch(SB_URL+'/rest/v1/'+TABLE+'?select=key,content', {headers: {'apikey': SB_KEY, 'Authorization': 'Bearer '+SB_KEY}});
+        const r = await fetch(SB_URL+'/rest/v1/'+TABLE+'?select=key,content,updated_at&order=updated_at.desc', {headers: {'apikey': SB_KEY, 'Authorization': 'Bearer '+SB_KEY}});
         const rows = await r.json();
         if(Array.isArray(rows) && rows.length){
           const origSet = localStorage.setItem.bind(localStorage);
+          const seen = new Set();
           let loaded = false;
 
+          // Строки отсортированы по updated_at DESC — первая встретившаяся строка на ключ самая свежая.
           rows.forEach(row => {
             if(!row.key || row.content === null) return;
+            if(seen.has(row.key)) return;
+            seen.add(row.key);
 
-            // Умное слияние: для массивов (calendarData, projectsData, planData) — объединяем уникальные элементы
-            // Для объектов (revenueData, cellComments) — глубокое слияние
-            const localRaw = localStorage.getItem(row.key);
-
-            if(row.key === 'calendarData' || row.key === 'projectsData' || row.key === 'planData'){
-              try {
-                const sbArr = JSON.parse(row.content) || [];
-                const localArr = JSON.parse(localRaw || '[]') || [];
-                // Merge: items from local that are not in SB (by id), plus all SB items
-                const sbIds = new Set(sbArr.map(x => x.id).filter(Boolean));
-                const localOnly = localArr.filter(x => x.id && !sbIds.has(x.id));
-                const merged = [...sbArr, ...localOnly];
-                origSet(row.key, JSON.stringify(merged));
-              } catch(e){ origSet(row.key, row.content); }
-            } else if(row.key === 'revenueData'){
-              try {
-                const sbObj = JSON.parse(row.content) || {};
-                const localObj = JSON.parse(localRaw || '{}') || {};
-                // Deep merge revenueData: { "2026-01": { fot: 0, revenue: 100, ... }, ... }
-                const merged = Object.assign({}, localObj);
-                Object.entries(sbObj).forEach(([month, sbMonthData]) => {
-                  if(!merged[month]){
-                    merged[month] = sbMonthData;
-                  } else {
-                    // Merge month-level keys: take max value (whichever is non-zero)
-                    merged[month] = Object.assign({}, merged[month]);
-                    Object.entries(sbMonthData).forEach(([k, v]) => {
-                      if(v && !merged[month][k]) merged[month][k] = v;
-                      else if(v && merged[month][k]) merged[month][k] = Math.max(merged[month][k], v);
-                    });
-                  }
-                });
-                origSet(row.key, JSON.stringify(merged));
-              } catch(e){ origSet(row.key, row.content); }
-            } else if(row.key === 'cellComments' || row.key === 'collapsedSections'){
-              try {
-                const sbObj = JSON.parse(row.content) || {};
-                const localObj = JSON.parse(localRaw || '{}') || {};
-                const merged = Object.assign({}, sbObj,
-                  Object.fromEntries(Object.entries(localObj).filter(([k]) => !(k in sbObj)))
-                );
-                origSet(row.key, JSON.stringify(merged));
-              } catch(e){ origSet(row.key, row.content); }
-            } else {
-              // Для остальных (articles, planData и пр.) — берём из Supabase
-              origSet(row.key, row.content);
-            }
+            // Supabase всегда выигрывает: все локальные изменения уже были записаны в SB.
+            origSet(row.key, row.content);
             loaded = true;
           });
 
@@ -821,10 +782,16 @@
             
             <div class="card">
                 <div class="card-title">Полный реестр банковских операций</div>
+                <div id="registryBulkBar" style="display:none; padding:10px 12px; background:#fff3cd; border:1px solid #ffc107; border-radius:8px; margin-bottom:12px; align-items:center; gap:12px;">
+                    <strong id="registryBulkCount">Выбрано: 0</strong>
+                    <button class="btn btn-small" style="background:var(--danger); color:#fff;" onclick="bulkDeleteRegistry()">Удалить выбранные</button>
+                    <button class="btn btn-small btn-secondary" onclick="clearRegistrySelection()">Снять выделение</button>
+                </div>
                 <div class="table-scroll">
                     <table id="registryTable">
                         <thead>
                             <tr>
+                                <th style="width:32px;"><input type="checkbox" id="registrySelectAll" onchange="toggleRegistrySelectAll(this.checked)"></th>
                                 <th>Дата</th>
                                 <th>Контрагент</th>
                                 <th>Назначение</th>
@@ -1087,6 +1054,8 @@
                 // ВЫРУЧКА
                 { section: true, name: 'Выручка' },
                 { name: 'Вывод за штат', key: 'external_staff', type: 'income', indent: true },
+                { name: 'Подбор персонала', key: 'recruitment', type: 'income', indent: true },
+                { name: 'Оформление миграционных документов', key: 'migration_docs', type: 'income', indent: true },
                 
                 // ПЕРЕМЕННЫЕ РАСХОДЫ
                 { section: true, name: 'Переменные расходы' },
@@ -1178,10 +1147,33 @@
                 saveArticles();
                 console.log('Added unallocated articles to existing articles list');
             }
+
+            // Добавляем новые статьи выручки в старые списки articles
+            const newRevenueArts = [
+                { name: 'Подбор персонала', key: 'recruitment', type: 'income', indent: true },
+                { name: 'Оформление миграционных документов', key: 'migration_docs', type: 'income', indent: true }
+            ];
+            let addedRev = false;
+            newRevenueArts.forEach(na => {
+                if (!appState.articles.some(a => a.key === na.key)) {
+                    // Вставляем после 'external_staff'
+                    const extIdx = appState.articles.findIndex(a => a.key === 'external_staff');
+                    if (extIdx >= 0) {
+                        appState.articles.splice(extIdx + 1, 0, na);
+                    } else {
+                        appState.articles.push(na);
+                    }
+                    addedRev = true;
+                }
+            });
+            if (addedRev) { saveArticles(); console.log('Added new revenue articles'); }
         }
 
         document.addEventListener('DOMContentLoaded', () => {
             migrateUnallocatedArticles();
+            // revenueData/projectsData — производные от calendarData. Пересчитываем на старте,
+            // чтобы гарантировать согласованность после загрузки из Supabase.
+            try { recalcDerivedData(); } catch(e){ console.warn('recalcDerivedData on load:', e); }
             updateDashboard();
             updateOPU();
             updateCalendar();
@@ -1201,6 +1193,7 @@
                 appState.cellComments = JSON.parse(localStorage.getItem('cellComments') || '{}');
                 appState.collapsedSections = JSON.parse(localStorage.getItem('collapsedSections') || '{}');
                 migrateUnallocatedArticles();
+                try { recalcDerivedData(); } catch(e){ console.warn('recalcDerivedData on reload:', e); }
                 updateDashboard();
                 updateOPU();
                 updateCalendar();
@@ -1457,6 +1450,9 @@
             let leasingCreditTotal = {};
             let belowOpTotal = {};
 
+            // Разбивка выручки по статьям: [{name, key, byMonth: {m: value}}] для рендера % от выручки
+            const revenueArticleStats = [];
+
             months.forEach(m => {
                 revenueTotal[m] = 0;
                 costTotal[m] = 0;
@@ -1480,7 +1476,20 @@
                             tbody += `<td>${formatMoney(revenueTotal[m])}</td>`;
                         });
                         tbody += `<td>${formatMoney(totalRev)}</td></tr>`;
-                        
+
+                        // Доля каждой статьи выручки от общей выручки
+                        revenueArticleStats.forEach(ra => {
+                            tbody += `<tr style="background: var(--bg-secondary);"><td style="padding-left:36px; font-size:12px; color:var(--text-secondary);">Доля «${ra.name}» от выручки, %</td>`;
+                            let raTotal = 0;
+                            months.forEach(m => {
+                                const v = ra.byMonth[m] || 0;
+                                raTotal += v;
+                                const pct = revenueTotal[m] > 0 ? (v / revenueTotal[m] * 100) : 0;
+                                tbody += `<td style="font-size:12px; color:var(--text-secondary);">${formatPercent(pct)}</td>`;
+                            });
+                            const totalPct = totalRev > 0 ? (raTotal / totalRev * 100) : 0;
+                            tbody += `<td style="font-size:12px; color:var(--text-secondary);">${formatPercent(totalPct)}</td></tr>`;
+                        });
                     }
                     
                     if (currentSection === 'Переменные расходы') {
@@ -1710,6 +1719,13 @@
                             const curSub = window.currentSubsection || '';
                             if (currentSection === 'Выручка') {
                                 revenueTotal[m] += value;
+                                // Собираем разбивку по статьям выручки
+                                let ra = revenueArticleStats.find(r => r.key === article.key);
+                                if (!ra) {
+                                    ra = { key: article.key, name: article.name, byMonth: {} };
+                                    revenueArticleStats.push(ra);
+                                }
+                                ra.byMonth[m] = (ra.byMonth[m] || 0) + value;
                             } else if (currentSection === 'Переменные расходы') {
                                 costTotal[m] += value;
                             } else if (currentSection === 'Постоянные расходы') {
@@ -1749,25 +1765,26 @@
             const monthKey = `${year}-${month}`;
             const monthData = appState.revenueData?.[monthKey] || {};
 
-            // Начинаем с данных из revenueData (зарплата, продажи)
+            // Начинаем с данных из revenueData (зарплата fot/ndfl/pfr/fss, выручка по статьям)
             const result = { ...monthData };
 
-            // Маппим revenue → external_staff
-            if (result.revenue && !result.external_staff) {
+            // Маппим общий revenue → external_staff (для обратной совместимости, если нет разбивки по статьям)
+            const hasBreakdown = result.external_staff || result.recruitment || result.migration_docs;
+            if (result.revenue && !hasBreakdown) {
                 result.external_staff = result.revenue;
             }
 
-            // Добавляем данные из calendarData по articleKey за этот месяц
-            // В ОПУ попадают ТОЛЬКО: покупки, зарплата (через revenueData), продажи (через revenue→external_staff),
-            // ручные операции (source:'manual'). Банковская выписка (source:'bank') в ОПУ НЕ попадает.
+            // Статьи, которые уже агрегированы в revenueData и не берутся из calendarData повторно
+            const salaryKeys = new Set(['fot','ndfl','pfr','fss','office_fot','office_ndfl','office_pfr','office_fss']);
+
             appState.calendarData.forEach(t => {
                 if (!t.date || !t.date.startsWith(monthKey)) return;
                 if (!t.articleKey) return;
-                // Пропускаем зарплатные — они уже в revenueData (fot/ndfl/pfr/fss)
-                if (t.source === 'salary') return;
-                // Пропускаем продажи — они уже через revenue→external_staff
+                // Пропускаем продажи — они через revenueData (revenue + разбивка по статьям)
                 if (t.source === 'sales') return;
-                // Пропускаем банк — банковская выписка идёт только в реестр/календарь, не в ОПУ
+                // Пропускаем зарплату любого происхождения — она уже в revenueData
+                if (salaryKeys.has(t.articleKey)) return;
+                // Банковская выписка в ОПУ не попадает
                 if (t.source === 'bank') return;
 
                 if (!result[t.articleKey]) result[t.articleKey] = 0;
@@ -3506,11 +3523,12 @@
                 // Определяем тип операции
                 const isIncome = op.credit > 0;
                 const amount = isIncome ? op.credit : op.debit;
-                
+
                 // Если статья не назначена — ставим нераспределённый доход/расход
                 const finalArticleKey = op.articleKey || (isIncome ? 'unallocated_income' : 'unallocated_expense');
 
                 appState.calendarData.push({
+                    id: 'bnk_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
                     date: op.date,
                     type: isIncome ? 'income' : 'expense',
                     amount: amount,
@@ -3519,10 +3537,10 @@
                     source: 'bank',
                     articleKey: finalArticleKey
                 });
-                
+
                 addedCount++;
             });
-            
+
             // Сохраняем
             localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
 
@@ -3531,6 +3549,7 @@
             updateRegistry();
             updateDashboard();
             updateAnalytics();
+            updateUnitEconomics();
 
             alert(`Загружено ${addedCount} операций в платежный календарь!\n\nБанковская выписка отображается в реестре и календаре, но НЕ учитывается в ОПУ (в ОПУ попадают только покупки, зарплата, продажи и ручные операции).`);
             
@@ -3843,45 +3862,83 @@
             return dateStr;
         }
         
+        // Три статьи выручки: вывод за штат, подбор персонала, оформление миграционных документов.
+        const REVENUE_ARTICLE_OPTIONS = [
+            { key: 'external_staff', name: 'Вывод за штат' },
+            { key: 'recruitment', name: 'Подбор персонала' },
+            { key: 'migration_docs', name: 'Оформление миграционных документов' }
+        ];
+
         function showSalesPreview(salesOps) {
             const container = document.getElementById('salesPreview');
-            
+
             if (salesOps.length === 0) {
                 container.innerHTML = '<p>Файл пустой или некорректный формат</p>';
                 return;
             }
-            
+
+            // Предзаполняем статью для каждой операции: по справочнику контрагентов либо external_staff по умолчанию
+            salesOps.forEach(op => {
+                if (!op.revenueArticle) {
+                    const cp = findCounterpartyMatch(op.counterparty);
+                    op.revenueArticle = (cp && cp.article && REVENUE_ARTICLE_OPTIONS.some(r => r.key === cp.article))
+                        ? cp.article
+                        : 'external_staff';
+                }
+            });
+
+            const buildArticleSelect = (selectedKey, onchange) => {
+                return `<select ${onchange} style="width:100%; padding:4px; font-size:12px;">${
+                    REVENUE_ARTICLE_OPTIONS.map(r => `<option value="${r.key}" ${r.key === selectedKey ? 'selected' : ''}>${r.name}</option>`).join('')
+                }</select>`;
+            };
+
+            window.pendingSalesData = salesOps;
+            window.renderSalesPreviewTable = function(){
+                const tbody = document.getElementById('salesPreviewBody');
+                if (!tbody) return;
+                let rows = '';
+                salesOps.forEach((op, i) => {
+                    const formattedWithVat = op.amountWithVat.toLocaleString('ru-RU', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                    const formattedNoVat = op.amountNoVat.toLocaleString('ru-RU', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                    rows += `
+                        <tr>
+                            <td><input type="checkbox" class="sales-preview-check" data-idx="${i}" onchange="updateSalesBulkCount()"></td>
+                            <td>${op.date}</td>
+                            <td style="text-align:left;">${op.counterparty}</td>
+                            <td>${formattedWithVat} ₽</td>
+                            <td>${formattedNoVat} ₽</td>
+                            <td>${buildArticleSelect(op.revenueArticle, `onchange="setSalesArticle(${i}, this.value)"`)}</td>
+                        </tr>
+                    `;
+                });
+                tbody.innerHTML = rows;
+            };
+
             let html = `
                 <h4>Загружено операций: ${salesOps.length}</h4>
+                <div style="margin:12px 0; padding:12px; background:var(--bg-secondary); border-radius:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <strong style="font-size:13px;">Массовое назначение статьи:</strong>
+                    <label style="font-size:12px;"><input type="checkbox" id="salesSelectAll" onchange="toggleSalesSelectAll(this.checked)"> Выбрать все</label>
+                    <span id="salesBulkCount" style="font-size:12px; color:var(--text-secondary);">Выбрано: 0</span>
+                    <select id="salesBulkArticle" style="padding:6px; font-size:13px;">
+                        ${REVENUE_ARTICLE_OPTIONS.map(r => `<option value="${r.key}">${r.name}</option>`).join('')}
+                    </select>
+                    <button class="btn btn-small" onclick="applySalesBulkArticle()">Применить к выбранным</button>
+                </div>
                 <div class="table-scroll" style="max-height: 400px;">
                     <table>
                         <thead>
                             <tr>
+                                <th style="width:32px;"></th>
                                 <th>Дата</th>
                                 <th>Контрагент</th>
                                 <th>Сумма с НДС</th>
                                 <th>Сумма без НДС</th>
+                                <th style="min-width:220px;">Статья выручки</th>
                             </tr>
                         </thead>
-                        <tbody>
-            `;
-            
-            salesOps.forEach(op => {
-                const formattedWithVat = op.amountWithVat.toLocaleString('ru-RU', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-                const formattedNoVat = op.amountNoVat.toLocaleString('ru-RU', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-                
-                html += `
-                    <tr>
-                        <td>${op.date}</td>
-                        <td style="text-align: left;">${op.counterparty}</td>
-                        <td>${formattedWithVat} ₽</td>
-                        <td>${formattedNoVat} ₽</td>
-                    </tr>
-                `;
-            });
-            
-            html += `
-                        </tbody>
+                        <tbody id="salesPreviewBody"></tbody>
                     </table>
                 </div>
                 <div style="margin-top: 20px;">
@@ -3889,9 +3946,44 @@
                     <button class="btn btn-secondary" onclick="cancelSalesUpload()">Отмена</button>
                 </div>
             `;
-            
+
             container.innerHTML = html;
-            window.pendingSalesData = salesOps;
+            window.renderSalesPreviewTable();
+        }
+
+        function setSalesArticle(idx, value) {
+            if (!window.pendingSalesData || !window.pendingSalesData[idx]) return;
+            window.pendingSalesData[idx].revenueArticle = value;
+        }
+
+        function toggleSalesSelectAll(checked) {
+            document.querySelectorAll('.sales-preview-check').forEach(cb => { cb.checked = checked; });
+            updateSalesBulkCount();
+        }
+
+        function updateSalesBulkCount() {
+            const count = document.querySelectorAll('.sales-preview-check:checked').length;
+            const el = document.getElementById('salesBulkCount');
+            if (el) el.textContent = `Выбрано: ${count}`;
+        }
+
+        function applySalesBulkArticle() {
+            const articleKey = document.getElementById('salesBulkArticle').value;
+            const checks = document.querySelectorAll('.sales-preview-check:checked');
+            if (checks.length === 0) { alert('Выберите операции галочками'); return; }
+            checks.forEach(cb => {
+                const idx = parseInt(cb.dataset.idx);
+                if (window.pendingSalesData[idx]) window.pendingSalesData[idx].revenueArticle = articleKey;
+            });
+            window.renderSalesPreviewTable();
+            // восстанавливаем галочки после перерисовки
+            setTimeout(() => {
+                document.querySelectorAll('.sales-preview-check').forEach((cb, i) => {
+                    const idx = parseInt(cb.dataset.idx);
+                    cb.checked = Array.from(checks).some(c => parseInt(c.dataset.idx) === idx);
+                });
+                updateSalesBulkCount();
+            }, 0);
         }
         
         function applySalesData() {
@@ -4005,30 +4097,31 @@
             }
             
             salesOps.forEach(op => {
-                // Определяем статью по контрагенту из справочника
+                // Статья выручки задаётся в предпросмотре; fallback — по справочнику либо external_staff
                 const matchedCp = findCounterpartyMatch(op.counterparty);
-                const artKey = (matchedCp && matchedCp.article) ? matchedCp.article : 'external_staff';
-                // Определяем проект: либо из справочника, либо имя контрагента
+                const revenueArticle = op.revenueArticle
+                    || (matchedCp && matchedCp.article && REVENUE_ARTICLE_OPTIONS.some(r => r.key === matchedCp.article) ? matchedCp.article : 'external_staff');
                 const projName = (matchedCp && matchedCp.project) ? matchedCp.project : op.counterparty;
 
                 appState.calendarData.push({
+                    id: 'sale_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
                     date: op.date,
                     type: 'income',
                     amount: op.amountNoVat,
                     counterparty: op.counterparty,
                     purpose: 'Продажа',
                     source: 'sales',
-                    articleKey: artKey,
+                    articleKey: revenueArticle,
+                    revenueArticle: revenueArticle,
                     project: projName
                 });
             });
 
             console.log('Added sales to calendarData, total:', appState.calendarData.length);
 
-            // Сохраняем
-            localStorage.setItem('revenueData', JSON.stringify(appState.revenueData));
-            localStorage.setItem('projectsData', JSON.stringify(appState.projectsData));
+            // Сохраняем calendarData, затем пересчитываем revenueData/projectsData как производные
             localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
+            recalcDerivedData();
 
             // Обновляем все вкладки
             updateOPU();
@@ -4626,9 +4719,12 @@
             if (!appState.calendarData) appState.calendarData = [];
             const salaryDate = `${fileYear}-${fileMonth}-01`; // 1-е число месяца
 
+            const mkId = () => 'sal_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+
             salaryData.forEach(obj => {
                 if (obj.totalToPay > 0) {
                     appState.calendarData.push({
+                        id: mkId(),
                         date: salaryDate, type: 'expense', amount: obj.totalToPay,
                         counterparty: obj.projectName || obj.objectName,
                         purpose: `ФОТ (к выплате) — ${obj.objectName}`,
@@ -4637,6 +4733,7 @@
                 }
                 if (obj.totalNDFL > 0) {
                     appState.calendarData.push({
+                        id: mkId(),
                         date: salaryDate, type: 'expense', amount: obj.totalNDFL,
                         counterparty: obj.projectName || obj.objectName,
                         purpose: `НДФЛ — ${obj.objectName}`,
@@ -4645,6 +4742,7 @@
                 }
                 if (obj.totalPFR > 0) {
                     appState.calendarData.push({
+                        id: mkId(),
                         date: salaryDate, type: 'expense', amount: obj.totalPFR,
                         counterparty: obj.projectName || obj.objectName,
                         purpose: `ПФР — ${obj.objectName}`,
@@ -4653,6 +4751,7 @@
                 }
                 if (obj.totalFSS > 0) {
                     appState.calendarData.push({
+                        id: mkId(),
                         date: salaryDate, type: 'expense', amount: obj.totalFSS,
                         counterparty: obj.projectName || obj.objectName,
                         purpose: `ФСС — ${obj.objectName}`,
@@ -4661,10 +4760,9 @@
                 }
             });
 
-            // Сохраняем
+            // Сохраняем calendarData; revenueData/projectsData — производные.
             localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
-            localStorage.setItem('revenueData', JSON.stringify(appState.revenueData));
-            localStorage.setItem('projectsData', JSON.stringify(appState.projectsData));
+            recalcDerivedData();
 
             updateOPU();
             updateUnitEconomics();
@@ -4857,6 +4955,7 @@
                 const purposeText = artDef ? artDef.name : 'Покупка';
                 monthsSet.add(op.date.substring(0, 7));
                 appState.calendarData.push({
+                    id: 'pur_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
                     date: op.date,
                     type: 'expense',
                     amount: op.amount,
@@ -4867,8 +4966,9 @@
                 });
             });
 
-            // Сохраняем
+            // Сохраняем calendarData; revenueData/projectsData — производные.
             localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
+            recalcDerivedData();
 
             // Обновляем все вкладки
             updateOPU();
@@ -5739,9 +5839,19 @@
             const source = sourceEl ? sourceEl.value : 'all';
             const searchText = searchEl.value.toLowerCase();
 
+            // Нормализуем дату: поддержка формата YYYY-M-D и YYYY-MM-DD
+            const normDate = (d) => {
+                if (!d) return '';
+                const parts = d.toString().split('-');
+                if (parts.length !== 3) return d;
+                return `${parts[0]}-${parts[1].padStart(2,'0')}-${parts[2].padStart(2,'0')}`;
+            };
+
             let transactions = appState.calendarData.filter(t => {
-                if (t.date.substring(0, 4) !== year) return false;
-                if (month && t.date.substring(5, 7) !== month) return false;
+                const d = normDate(t.date);
+                if (!d) return false;
+                if (d.substring(0, 4) !== year) return false;
+                if (month && d.substring(5, 7) !== month) return false;
                 if (type === 'income' && t.type !== 'income') return false;
                 if (type === 'expense' && t.type !== 'expense') return false;
                 if (source !== 'all' && (t.source || 'bank') !== source) return false;
@@ -5787,6 +5897,7 @@
 
                 html += `
                     <tr style="${rowBg}">
+                        <td style="text-align:center;"><input type="checkbox" class="registry-row-check" data-idx="${fullIndex}" onchange="updateRegistryBulkBar()"></td>
                         <td style="white-space:nowrap;">${new Date(t.date).toLocaleDateString('ru-RU')}</td>
                         <td style="font-size:12px;">${t.counterparty || '—'}</td>
                         <td style="font-size:11px; max-width:250px; white-space:normal;">${(t.purpose || '—').substring(0, 80)}</td>
@@ -5806,6 +5917,7 @@
             if (transactions.length > 0) {
                 html += `
                     <tr style="border-top:3px solid var(--text-primary); background:var(--bg-secondary); font-weight:700;">
+                        <td></td>
                         <td colspan="3">ИТОГО (${transactions.length})</td>
                         <td style="text-align:right; color:var(--success);">${formatMoney(totalIncome)}</td>
                         <td style="text-align:right; color:var(--danger);">${formatMoney(totalExpense)}</td>
@@ -5816,8 +5928,57 @@
 
             const tableBody = document.getElementById('registryTableBody');
             if (tableBody) {
-                tableBody.innerHTML = html || '<tr><td colspan="9" style="text-align:center; padding:40px; color:var(--text-secondary);">Нет данных за выбранный период</td></tr>';
+                tableBody.innerHTML = html || '<tr><td colspan="10" style="text-align:center; padding:40px; color:var(--text-secondary);">Нет данных за выбранный период</td></tr>';
             }
+            // После перерисовки чистим выделение и скрываем панель действий
+            const selAll = document.getElementById('registrySelectAll');
+            if (selAll) selAll.checked = false;
+            updateRegistryBulkBar();
+        }
+
+        function toggleRegistrySelectAll(checked) {
+            document.querySelectorAll('.registry-row-check').forEach(cb => { cb.checked = checked; });
+            updateRegistryBulkBar();
+        }
+
+        function updateRegistryBulkBar() {
+            const checked = document.querySelectorAll('.registry-row-check:checked');
+            const bar = document.getElementById('registryBulkBar');
+            const lbl = document.getElementById('registryBulkCount');
+            if (!bar || !lbl) return;
+            if (checked.length > 0) {
+                bar.style.display = 'flex';
+                lbl.textContent = `Выбрано: ${checked.length}`;
+            } else {
+                bar.style.display = 'none';
+            }
+        }
+
+        function clearRegistrySelection() {
+            document.querySelectorAll('.registry-row-check').forEach(cb => { cb.checked = false; });
+            const selAll = document.getElementById('registrySelectAll');
+            if (selAll) selAll.checked = false;
+            updateRegistryBulkBar();
+        }
+
+        function bulkDeleteRegistry() {
+            const checked = Array.from(document.querySelectorAll('.registry-row-check:checked'));
+            if (checked.length === 0) return;
+            if (!confirm(`Удалить выбранные операции (${checked.length})? Это действие нельзя отменить.`)) return;
+
+            // Сортируем индексы по убыванию, чтобы splice не сбивал позиции
+            const indices = checked.map(cb => parseInt(cb.dataset.idx)).filter(n => !isNaN(n)).sort((a, b) => b - a);
+            indices.forEach(i => {
+                if (i >= 0 && i < appState.calendarData.length) appState.calendarData.splice(i, 1);
+            });
+            localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
+            recalcDerivedData();
+            updateRegistry();
+            updateDashboard();
+            updateOPU();
+            updateCalendar();
+            updateUnitEconomics();
+            updateAnalytics();
         }
         
         function editTransaction(index) {
@@ -5886,55 +6047,63 @@
             updateAnalytics();
         }
 
-        // Полный пересчёт revenueData и projectsData из calendarData
+        // Полный пересчёт revenueData и projectsData из calendarData.
+        // revenueData — единый источник агрегированных месячных показателей для ОПУ:
+        //   revenue — из продаж (source='sales'),
+        //   fot/ndfl/pfr/fss + office_* — из зарплаты (source='salary') и ручных зп (source='manual'),
+        //   подбор персонала и миграционные документы — по articleKey.
         function recalcDerivedData() {
-            // --- revenueData: выручка из sales, зп из salary ---
             const newRevenue = {};
+            const salaryKeys = ['fot','ndfl','pfr','fss','office_fot','office_ndfl','office_pfr','office_fss'];
 
-            // Выручка из продаж
-            appState.calendarData.filter(t => t.source === 'sales').forEach(t => {
-                const mk = t.date.substring(0, 7);
-                if (!newRevenue[mk]) newRevenue[mk] = {};
-                newRevenue[mk]['revenue'] = (newRevenue[mk]['revenue'] || 0) + (t.amount || 0);
-            });
+            // Определяем месяц строго по substring — никаких timezone-сдвигов.
+            function monthKey(dateStr){
+                return (dateStr && dateStr.length >= 7) ? dateStr.substring(0,7) : null;
+            }
 
-            // Зарплатные данные — сохраняем существующие, т.к. они загружаются отдельно из файлов
-            // и не хранятся в calendarData (fot, ndfl, pfr, fss)
-            Object.keys(appState.revenueData || {}).forEach(mk => {
-                const old = appState.revenueData[mk];
+            appState.calendarData.forEach(t => {
+                const mk = monthKey(t.date);
+                if (!mk) return;
                 if (!newRevenue[mk]) newRevenue[mk] = {};
-                ['fot', 'ndfl', 'pfr', 'fss'].forEach(k => {
-                    if (old[k]) newRevenue[mk][k] = old[k];
-                });
+
+                if (t.source === 'sales') {
+                    // Выручка — агрегируем по revenueArticle (подбор, миграция) или общему revenue
+                    const ra = t.revenueArticle || 'revenue';
+                    newRevenue[mk][ra] = (newRevenue[mk][ra] || 0) + (t.amount || 0);
+                    newRevenue[mk]['revenue'] = (newRevenue[mk]['revenue'] || 0) + (t.amount || 0);
+                } else if ((t.source === 'salary' || t.source === 'manual') && salaryKeys.includes(t.articleKey)) {
+                    // Зарплата в себестоимость ОПУ
+                    newRevenue[mk][t.articleKey] = (newRevenue[mk][t.articleKey] || 0) + (t.amount || 0);
+                }
             });
 
             appState.revenueData = newRevenue;
             localStorage.setItem('revenueData', JSON.stringify(appState.revenueData));
 
-            // --- projectsData: пересчёт выручки из sales ---
-            const projectRevMap = {};
-            appState.calendarData.filter(t => t.source === 'sales').forEach(t => {
-                const cp = findCounterpartyMatch(t.counterparty);
-                const proj = (cp && cp.project) ? cp.project : t.counterparty;
-                if (!projectRevMap[proj]) projectRevMap[proj] = 0;
-                projectRevMap[proj] += t.amount || 0;
-            });
+            // --- projectsData: пересчёт выручки и расходов из calendarData ---
+            const projectMap = {};
 
-            // Обновляем выручку в projectsData
+            // Сохраняем employees/базовые имена из старых projectsData
             (appState.projectsData || []).forEach(p => {
-                p.revenue = projectRevMap[p.name] || 0;
-                delete projectRevMap[p.name];
+                projectMap[p.name] = { name: p.name, revenue: 0, costs: 0, employees: p.employees || 0 };
             });
 
-            // Если появились новые проекты из оставшихся продаж
-            Object.keys(projectRevMap).forEach(name => {
-                if (projectRevMap[name] > 0) {
-                    appState.projectsData.push({ name, revenue: projectRevMap[name], costs: 0, employees: 0 });
+            appState.calendarData.forEach(t => {
+                let projName = t.project || null;
+                if (!projName) {
+                    const cp = findCounterpartyMatch(t.counterparty);
+                    if (cp && cp.project) projName = cp.project;
                 }
+                if (!projName && t.source === 'sales') projName = t.counterparty;
+                if (!projName) return;
+
+                if (!projectMap[projName]) projectMap[projName] = { name: projName, revenue: 0, costs: 0, employees: 0 };
+                if (t.type === 'income') projectMap[projName].revenue += t.amount || 0;
+                else projectMap[projName].costs += t.amount || 0;
             });
 
-            // Удаляем пустые проекты (0 выручки, 0 расходов, 0 сотрудников)
-            appState.projectsData = (appState.projectsData || []).filter(p =>
+            // Удаляем пустые проекты
+            appState.projectsData = Object.values(projectMap).filter(p =>
                 p.revenue > 0 || p.costs > 0 || p.employees > 0
             );
 
@@ -6287,8 +6456,11 @@
             });
 
             const ops = appState.calendarData.filter(t => {
-                // Прямое поле project (зарплата)
-                if (t.project && t.project.toLowerCase() === projectName.toLowerCase()) return true;
+                // Если у операции явно задан проект — учитываем только совпадение с текущим.
+                // Это важно после перемещения между проектами: нельзя показывать операцию в обоих.
+                if (t.project) {
+                    return t.project.toLowerCase() === projectName.toLowerCase();
+                }
                 // По контрагенту из справочника
                 if (cpNames.some(n => n.toLowerCase() === (t.counterparty||'').toLowerCase())) return true;
                 // Частичное совпадение имени
@@ -6398,17 +6570,38 @@
             if (!targetProject || opIdx < 0) return;
             const t = appState.calendarData[opIdx];
             if (!t) return;
-            // Находим контрагента и меняем проект
+
+            // 1) Меняем project на самой операции — это основной источник связи с проектом
+            t.project = targetProject;
+
+            // 2) Обновляем справочник контрагентов, чтобы будущие операции с этим
+            //    контрагентом автоматически попадали в новый проект
             const cps = getCounterparties();
             let cp = cps.find(c => c.name === t.counterparty || (c.variants||[]).includes(t.counterparty));
             if (cp) {
                 cp.project = targetProject;
                 saveCounterparties(cps);
             }
+
+            // 3) Гарантируем наличие целевого проекта в projectsData
+            if (!appState.projectsData) appState.projectsData = [];
+            if (!appState.projectsData.find(p => p.name === targetProject)) {
+                appState.projectsData.push({ name: targetProject, revenue: 0, costs: 0, employees: 0 });
+            }
+
             localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
+            localStorage.setItem('projectsData', JSON.stringify(appState.projectsData));
+
+            // 4) Пересчитываем производные: выручка и расходы проектов должны соответствовать calendarData
+            recalcDerivedData();
+
             updateUnitEconomics();
             updateOPU();
-            openProjectCard(sourceProject);
+            updateDashboard();
+            updateRegistry();
+            // Проверяем, что исходный проект ещё существует — иначе открываем целевой
+            const stillExists = (appState.projectsData || []).some(p => p.name === sourceProject);
+            openProjectCard(stillExists ? sourceProject : targetProject);
         }
 
         // === П.5 Справочник контрагентов: каскадное обновление при сохранении ===
@@ -6523,6 +6716,7 @@
 
             if (!appState.calendarData) appState.calendarData = [];
             appState.calendarData.push({
+                id: 'man_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
                 date: dateStr,
                 type: article.type || 'expense',
                 amount,
@@ -6568,6 +6762,7 @@
             const addRow = (amount, key, name) => {
                 if (amount <= 0) return;
                 appState.calendarData.push({
+                    id: 'man_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
                     date: dateStr,
                     type: 'expense',
                     amount,
