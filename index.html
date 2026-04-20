@@ -4188,13 +4188,22 @@
 
         function detectSalaryFormat(workbook) {
             const ws = workbook.Sheets[workbook.SheetNames[0]];
-            // Собираем текст из первых 5 строк (A1 может быть пустой из-за .xls смещения)
+            // Собираем текст из первых 6 строк (A1 может быть пустой из-за .xls смещения)
             const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', range: 0 });
             let allText = '';
-            for (let r = 0; r < Math.min(5, jsonData.length); r++) {
+            for (let r = 0; r < Math.min(6, jsonData.length); r++) {
                 allText += (jsonData[r] || []).join(' ').toLowerCase() + ' ';
             }
-            console.log('detectSalaryFormat allText:', allText.substring(0, 200));
+            console.log('detectSalaryFormat allText:', allText.substring(0, 300));
+
+            // Формат 4: Блочный реестр (Контур, Монолит) — многолистовой + заголовки
+            // "Начислено" + "ЗП на карту" + "НДФЛ", листы по месяцам, блоки через "Договор".
+            const looksLikeBlockRegister =
+                workbook.SheetNames.length >= 1 &&
+                allText.includes('зп на карту') &&
+                allText.includes('ндфл') &&
+                /договор\s*№|итого с ндс|нс\s/i.test(allText);
+            if (looksLikeBlockRegister) return 'block_register';
 
             // Формат 3: "Анализ зарплаты по сотрудникам и страховые взносы"
             if (allText.includes('анализ зарплаты') && allText.includes('страхов')) return 'analysis';
@@ -4213,6 +4222,180 @@
                 if (pm.month) return 'multi_sheet';
             }
             return 'employee_list';
+        }
+
+        // Парсер блочного реестра (Контур/Монолит): каждый лист — месяц, внутри листа —
+        // один или несколько блоков, каждый блок = объект/проект.
+        // Структура листа:
+        //   r0: [..., "ООО «КОМПАНИЯ»", ...]   (название компании)
+        //   r1: ["февраль 2026 г.", ...]        (период)
+        //   r3: ["№ п/п", "Ф.И.О.", "Начислено", "ЗП на карту", "НДФЛ", "ПФР", "ФСС НС", "Услуга/Комиссия", ...]
+        //   Далее блоки: [имя объекта] [Договор №...] [примечание] [сотрудники...] [ххх итоги]
+        function parseSalaryBlockRegister(workbook) {
+            const results = [];
+
+            function findHeaderRow(jsonData) {
+                for (let r = 0; r < Math.min(10, jsonData.length); r++) {
+                    const row = jsonData[r] || [];
+                    const rowText = row.map(c => (c == null ? '' : c.toString())).join(' ').toLowerCase();
+                    if (rowText.includes('начислено') && (rowText.includes('ндфл') || rowText.includes('зп на карту'))) {
+                        return r;
+                    }
+                }
+                return -1;
+            }
+
+            function mapColumns(headers) {
+                const cols = { name: 1, accrued: -1, toPay: -1, ndfl: -1, pfr: -1, fss: -1, service: -1 };
+                headers.forEach((h, i) => {
+                    const hl = (h == null ? '' : h.toString()).toLowerCase().trim();
+                    if (!hl) return;
+                    if (/ф\.?и\.?о/.test(hl) || hl.includes('сотрудник')) cols.name = i;
+                    else if (hl === 'начислено' || hl.includes('всего начислено') || hl.startsWith('начислено')) cols.accrued = i;
+                    else if (hl.includes('зп на карту') || hl.includes('к выплате') || hl.includes('на руки')) cols.toPay = i;
+                    else if (hl.includes('ндфл')) cols.ndfl = i;
+                    // ПФР/страховые взносы/отчисления — в старых листах колонка называется «Отчисления»
+                    else if (hl.includes('пфр') || hl.includes('страховые взносы') || hl.includes('отчислен')) cols.pfr = i;
+                    else if (hl.includes('фсс') || (hl.includes('нс') && hl.length <= 10)) cols.fss = i;
+                    else if (hl.includes('услуга') || hl.includes('комиссия')) cols.service = i;
+                });
+                return cols;
+            }
+
+            workbook.SheetNames.forEach(sheetName => {
+                const ws = workbook.Sheets[sheetName];
+                const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+                if (!jsonData || jsonData.length < 5) return;
+
+                // Месяц/год: ищем во всех ячейках первых 4 строк + имени листа
+                let month = null, year = null;
+                for (let r = 0; r < Math.min(4, jsonData.length); r++) {
+                    for (const cell of (jsonData[r] || [])) {
+                        const pm = parseMonthYear(cell);
+                        if (pm.month && pm.year) { month = pm.month; year = pm.year; break; }
+                        if (pm.month && !month) month = pm.month;
+                        if (pm.year && !year) year = pm.year;
+                    }
+                    if (month && year) break;
+                }
+                if (!month || !year) {
+                    const pm = parseMonthYear(sheetName);
+                    if (pm.month && !month) month = pm.month;
+                    if (pm.year && !year) year = pm.year;
+                }
+
+                // Название компании — берём последнюю непустую ячейку первых 2 строк
+                let companyName = '';
+                for (let r = 0; r < Math.min(2, jsonData.length); r++) {
+                    const row = jsonData[r] || [];
+                    for (const c of row) {
+                        const s = (c == null ? '' : c.toString()).trim();
+                        if (s && /(ООО|ИП|ПАО|АО|ЗАО)/i.test(s)) companyName = s;
+                    }
+                }
+                if (!companyName) companyName = sheetName;
+
+                const headerRow = findHeaderRow(jsonData);
+                if (headerRow < 0) return;
+                const cols = mapColumns(jsonData[headerRow] || []);
+                if (cols.accrued < 0 && cols.toPay < 0) return;
+
+                // Функция проверки, что строка — это строка сотрудника
+                const isEmployeeRow = (row) => {
+                    if (!row) return false;
+                    const firstCol = row[0];
+                    const numInFirst = parseFloat(firstCol);
+                    const hasNumber = !isNaN(numInFirst) && numInFirst > 0 && numInFirst < 1000;
+                    const name = (row[cols.name] == null ? '' : row[cols.name].toString()).trim();
+                    if (!hasNumber) return false;
+                    if (!name) return false;
+                    // Должна быть сумма хотя бы в одной из ключевых колонок
+                    const anyAmount = ['accrued','toPay','ndfl','pfr','fss','service'].some(k => {
+                        const ci = cols[k];
+                        if (ci < 0) return false;
+                        const v = parseFloat(row[ci]);
+                        return !isNaN(v) && v !== 0;
+                    });
+                    return anyAmount;
+                };
+
+                // Идём по строкам после шапки, накапливая блоки
+                let curBlock = null;
+                let pendingName = ''; // ожидающее имя объекта (встретили до "Договор")
+                const flushBlock = () => {
+                    if (curBlock && (curBlock.employeeCount > 0 || curBlock.totalAccrued > 0 || curBlock.totalToPay > 0)) {
+                        // Если нет имени объекта — используем имя компании или листа
+                        if (!curBlock.objectName) curBlock.objectName = companyName || sheetName;
+                        curBlock.fileMonth = month;
+                        curBlock.fileYear = year;
+                        results.push(curBlock);
+                    }
+                    curBlock = null;
+                };
+
+                const startBlock = (name) => {
+                    flushBlock();
+                    curBlock = {
+                        objectName: name || '',
+                        employeeCount: 0,
+                        totalAccrued: 0, totalToPay: 0, totalNDFL: 0,
+                        totalPFR: 0, totalFSS: 0, totalService: 0
+                    };
+                };
+
+                for (let r = headerRow + 2; r < jsonData.length; r++) {
+                    const row = jsonData[r] || [];
+                    const firstCol = (row[0] == null ? '' : row[0].toString()).trim();
+                    const firstLow = firstCol.toLowerCase();
+                    // Проверка на "ххх" — строка итогов блока
+                    const third = (row[2] == null ? '' : row[2].toString()).toLowerCase();
+                    const isTotalsRow = firstLow === 'ххх' || firstLow === 'итого' || third === 'ххх' || third === 'итого';
+
+                    if (isTotalsRow) {
+                        // Закрываем текущий блок
+                        flushBlock();
+                        pendingName = '';
+                        continue;
+                    }
+
+                    // Строка сотрудника?
+                    if (isEmployeeRow(row)) {
+                        if (!curBlock) {
+                            // Блок ещё не начат — создаём из последнего "ожидающего" имени или имени компании
+                            startBlock(pendingName || companyName || sheetName);
+                            pendingName = '';
+                        }
+                        curBlock.employeeCount++;
+                        if (cols.accrued >= 0) curBlock.totalAccrued += parseFloat(row[cols.accrued]) || 0;
+                        if (cols.toPay >= 0)  curBlock.totalToPay   += parseFloat(row[cols.toPay])   || 0;
+                        if (cols.ndfl >= 0)   curBlock.totalNDFL    += parseFloat(row[cols.ndfl])    || 0;
+                        if (cols.pfr >= 0)    curBlock.totalPFR     += parseFloat(row[cols.pfr])     || 0;
+                        if (cols.fss >= 0)    curBlock.totalFSS     += parseFloat(row[cols.fss])     || 0;
+                        if (cols.service >= 0) curBlock.totalService += parseFloat(row[cols.service]) || 0;
+                        continue;
+                    }
+
+                    // Не сотрудник, не итоги. Возможно — заголовок нового блока.
+                    if (!firstCol) continue;
+
+                    // "Договор №..." — запоминаем, но не меняем объект
+                    if (/^договор\s*№/i.test(firstCol)) {
+                        if (!curBlock && !pendingName) pendingName = ''; // ждём сотрудников, дальнейший текст игнорируем
+                        continue;
+                    }
+                    // Примечание — пропускаем
+                    if (firstLow.startsWith('примеч')) continue;
+
+                    // Иначе это, вероятно, имя объекта/проекта (напр. "МЕХАНИЗАЦИЯ")
+                    // — закрываем предыдущий блок и запоминаем имя до появления сотрудников
+                    flushBlock();
+                    pendingName = firstCol;
+                }
+                // В конце листа — закрываем незакрытый блок, если есть
+                flushBlock();
+            });
+
+            return results;
         }
 
         function parseSalaryMultiSheet(workbook) {
@@ -4473,7 +4656,8 @@
                         console.log(`File "${file.name}" detected format: ${format}`);
 
                         let parsed = [];
-                        if (format === 'multi_sheet') parsed = parseSalaryMultiSheet(workbook);
+                        if (format === 'block_register') parsed = parseSalaryBlockRegister(workbook);
+                        else if (format === 'multi_sheet') parsed = parseSalaryMultiSheet(workbook);
                         else if (format === 'analysis') parsed = parseSalaryAnalysis(workbook);
                         else parsed = parseSalaryEmployeeList(workbook);
 
@@ -4512,6 +4696,16 @@
             renderSalaryPreviewTable();
         }
 
+        // Экранирование значений HTML-атрибутов (кавычки в именах контрагентов ломают <option value="...">)
+        function escapeHtmlAttr(v) {
+            return String(v == null ? '' : v)
+                .replace(/&/g, '&amp;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+        }
+
         function renderSalaryPreviewTable() {
             const salaryData = window.pendingSalaryData;
             if (!salaryData || salaryData.length === 0) {
@@ -4522,6 +4716,16 @@
             const container = document.getElementById('salaryPreview');
             const existingProjects = (appState.projectsData || []).map(p => p.name);
             const fmt = (v) => v.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+            // Инициализируем projectName для каждой строки однократно (точное совпадение по имени).
+            // Слабое совпадение через includes намеренно не используем — оно создавало ложные матчи.
+            salaryData.forEach(obj => {
+                if (!obj.projectName) {
+                    const exact = existingProjects.find(pn => pn.toLowerCase() === (obj.objectName || '').toLowerCase());
+                    obj.projectName = exact || obj.objectName;
+                    obj.projectMatched = !!exact;
+                }
+            });
 
             const totals = salaryData.reduce((acc, obj) => {
                 acc.employees += obj.employeeCount;
@@ -4536,9 +4740,6 @@
             const now = new Date();
             const defYear = hasDate ? salaryData[0].fileYear : now.getFullYear().toString();
             const defMonth = hasDate ? salaryData[0].fileMonth : String(now.getMonth() + 1).padStart(2, '0');
-
-            // Опции проектов для <select>
-            const projectOptions = existingProjects.map(p => `<option value="${p}">${p}</option>`).join('');
 
             let html = `<h4>Загружено объектов: ${salaryData.length}</h4>`;
 
@@ -4566,7 +4767,7 @@
                             <tr>
                                 <th style="width:30px;"></th>
                                 <th>Объект</th>
-                                <th style="min-width:180px;">Проект (привязка)</th>
+                                <th style="min-width:220px;">Проект (привязка)</th>
                                 <th>Сотр.</th>
                                 <th>К выплате</th>
                                 <th>НДФЛ</th>
@@ -4578,24 +4779,31 @@
             `;
 
             salaryData.forEach((obj, idx) => {
-                const matchedProject = existingProjects.find(pn =>
-                    pn.toLowerCase().includes(obj.objectName.toLowerCase()) ||
-                    obj.objectName.toLowerCase().includes(pn.toLowerCase())
-                );
-                const noProject = !matchedProject;
-                const selVal = matchedProject || '';
+                const selectedProject = obj.projectName || obj.objectName;
+                const exists = existingProjects.some(pn => pn.toLowerCase() === selectedProject.toLowerCase());
+                const noProject = !exists;
+
+                // Собираем options: если текущее имя не совпадает ни с одним проектом, показываем его первым
+                // как «не привязан» — пользователь явно выбирает проект из списка или создаёт новый.
+                const unmatchedOption = !exists
+                    ? `<option value="${escapeHtmlAttr(selectedProject)}" selected>— Не привязан: ${escapeHtmlAttr(selectedProject)}</option>`
+                    : '';
+                const projectOpts = existingProjects.map(pn => {
+                    const sel = pn.toLowerCase() === selectedProject.toLowerCase() ? 'selected' : '';
+                    return `<option value="${escapeHtmlAttr(pn)}" ${sel}>${escapeHtmlAttr(pn)}</option>`;
+                }).join('');
 
                 html += `
                     <tr style="${noProject ? 'background:#fff3cd;' : ''}" id="salary-row-${idx}">
                         <td style="text-align:center;">
                             <span onclick="deleteSalaryPreviewRow(${idx})" style="cursor:pointer; color:#dc3545; font-size:16px;" title="Удалить">×</span>
                         </td>
-                        <td style="text-align:left; font-weight:500; font-size:13px;">${obj.objectName}</td>
+                        <td style="text-align:left; font-weight:500; font-size:13px;">${escapeHtmlAttr(obj.objectName)}</td>
                         <td>
                             <div style="display:flex; gap:4px; align-items:center;">
-                                <select id="salary-project-${idx}" style="flex:1; padding:4px; font-size:12px; ${noProject ? 'border:2px solid #ffc107;' : ''}">
-                                    <option value="${obj.objectName}" ${!selVal ? 'selected' : ''}>${obj.objectName}</option>
-                                    ${projectOptions.replace(`value="${selVal}"`, `value="${selVal}" selected`)}
+                                <select id="salary-project-${idx}" onchange="onSalaryProjectChange(${idx}, this.value)" style="flex:1; padding:4px; font-size:12px; ${noProject ? 'border:2px solid #ffc107;' : ''}">
+                                    ${unmatchedOption}
+                                    ${projectOpts}
                                 </select>
                                 <button onclick="createProjectFromSalary(${idx})" style="padding:2px 6px; font-size:11px; border:1px solid var(--border); border-radius:4px; background:#fff; cursor:pointer; white-space:nowrap;" title="Создать новый проект">+</button>
                             </div>
@@ -4638,29 +4846,28 @@
             renderSalaryPreviewTable();
         }
 
+        // Сохраняем выбор пользователя в самой записи — чтобы rerender и последующий apply
+        // использовали именно выбранный проект, а не дефолтный objectName.
+        function onSalaryProjectChange(idx, value) {
+            if (!window.pendingSalaryData || !window.pendingSalaryData[idx]) return;
+            window.pendingSalaryData[idx].projectName = value;
+        }
+
         function createProjectFromSalary(idx) {
             const name = prompt('Название нового проекта:');
             if (!name || !name.trim()) return;
             const trimmed = name.trim();
-            // Создаём проект
             if (!appState.projectsData) appState.projectsData = [];
             if (!appState.projectsData.find(p => p.name === trimmed)) {
                 appState.projectsData.push({ name: trimmed, revenue: 0, costs: 0, employees: 0 });
                 localStorage.setItem('projectsData', JSON.stringify(appState.projectsData));
             }
-            // Обновляем выбор в UI
+            // Привязываем новый проект к этой строке, затем перерисовываем таблицу —
+            // остальные строки сохранят выбор, т.к. он хранится в obj.projectName.
+            if (window.pendingSalaryData && window.pendingSalaryData[idx]) {
+                window.pendingSalaryData[idx].projectName = trimmed;
+            }
             renderSalaryPreviewTable();
-            // Устанавливаем значение для этой строки
-            setTimeout(() => {
-                const sel = document.getElementById(`salary-project-${idx}`);
-                if (sel) {
-                    // Добавляем опцию если нет
-                    let found = false;
-                    for (const opt of sel.options) { if (opt.value === trimmed) { found = true; break; } }
-                    if (!found) { const o = document.createElement('option'); o.value = trimmed; o.textContent = trimmed; sel.appendChild(o); }
-                    sel.value = trimmed;
-                }
-            }, 50);
         }
 
         function applySalaryData() {
@@ -4675,11 +4882,14 @@
             const fileYear = yearEl ? yearEl.value : '2026';
             const monthKey = `${fileYear}-${fileMonth}`;
 
-            // Обновляем привязки проектов из UI
+            // Финальная сверка с UI (на случай, если onchange не успел сработать для последнего клика)
             salaryData.forEach((obj, idx) => {
                 const input = document.getElementById(`salary-project-${idx}`);
-                if (input) obj.projectName = input.value.trim() || obj.objectName;
-                else obj.projectName = obj.objectName;
+                if (input) {
+                    const v = input.value.trim();
+                    if (v) obj.projectName = v;
+                }
+                if (!obj.projectName) obj.projectName = obj.objectName;
             });
 
             // ОПУ: себестоимость
