@@ -5,68 +5,174 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Авагар – Финансовый учет</title>
 
-  <!-- SUPABASE SYNC -->
+  <!-- SUPABASE SYNC + AUTH -->
   <script>
   (function(){
     const SB_URL = 'https://nkzwwxdswourjbwyqmqy.supabase.co';
     const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5rend3eGRzd291cmpid3lxbXF5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzODI3NzksImV4cCI6MjA5MTk1ODc3OX0.P9asLiG_0cMJZ9zXc_wNGBCnfe9ysPTn_DSZA10ZtPY';
     const TABLE = 'finance_data';
-    const HEADERS = {'apikey': SB_KEY, 'Authorization': 'Bearer '+SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates'};
+    const SESSION_KEY = '_avagar_session';
 
-    // Save to Supabase (returns promise so callers can await completion)
+    // Получение заголовков — Authorization использует access_token пользователя, а не anon key
+    function getHeaders(extra){
+      const session = getSession();
+      const token = session && session.access_token ? session.access_token : SB_KEY;
+      return Object.assign({
+        'apikey': SB_KEY,
+        'Authorization': 'Bearer ' + token,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates'
+      }, extra || {});
+    }
+
+    function getSession(){
+      try {
+        const raw = localStorage.getItem(SESSION_KEY);
+        if(!raw) return null;
+        return JSON.parse(raw);
+      } catch(e){ return null; }
+    }
+    function setSession(s){
+      if(s) localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+      else localStorage.removeItem(SESSION_KEY);
+    }
+
+    // Signup/login/logout через Supabase Auth
+    async function signIn(email, password){
+      const r = await fetch(SB_URL + '/auth/v1/token?grant_type=password', {
+        method: 'POST',
+        headers: {'apikey': SB_KEY, 'Content-Type': 'application/json'},
+        body: JSON.stringify({email, password})
+      });
+      const data = await r.json();
+      if(!r.ok){ throw new Error(data.error_description || data.msg || 'Ошибка входа'); }
+      setSession(data);
+      return data;
+    }
+    async function signOut(){
+      const s = getSession();
+      if(s && s.access_token){
+        try {
+          await fetch(SB_URL + '/auth/v1/logout', {
+            method: 'POST',
+            headers: {'apikey': SB_KEY, 'Authorization': 'Bearer ' + s.access_token}
+          });
+        } catch(e){}
+      }
+      setSession(null);
+      // Чистим локальные финансовые данные, чтобы другой пользователь на этом же устройстве их не увидел
+      const PRESERVE = [SESSION_KEY];
+      const keys = Object.keys(localStorage);
+      keys.forEach(k => { if(!PRESERVE.includes(k)) localStorage.removeItem(k); });
+      location.reload();
+    }
+
+    // Save to Supabase
     function sbSet(key, value){
       return fetch(SB_URL+'/rest/v1/'+TABLE, {
         method: 'POST',
-        headers: HEADERS,
+        headers: getHeaders(),
         body: JSON.stringify({key, content: value, updated_at: new Date().toISOString()})
       }).catch(()=>{});
     }
-
-    // Экспортируем для использования из confirmClearData и других мест
     window.sbSet = sbSet;
+    window.avagarSignIn = signIn;
+    window.avagarSignOut = signOut;
+    window.avagarHasSession = function(){ return !!getSession(); };
 
-    // Override localStorage.setItem to also sync to Supabase
+    // Перехват localStorage.setItem — синхронизация в Supabase, кроме служебной сессии
     const origSetItem = localStorage.setItem.bind(localStorage);
     localStorage.setItem = function(key, value){
       origSetItem(key, value);
-      sbSet(key, value);
+      if(key === SESSION_KEY) return;
+      if(getSession()) sbSet(key, value);
     };
 
-    // On load: fetch all data from Supabase, populate localStorage, then reload appState
-    // Стратегия: Supabase — источник истины (every localStorage.setItem записывает в SB).
-    // Если в SB несколько строк на один ключ, берём самую свежую по updated_at.
-    window.addEventListener('DOMContentLoaded', async function(){
+    // UI экрана входа
+    function renderLoginScreen(errorMsg){
+      document.body.innerHTML = `
+        <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:20px;">
+          <div style="background:#fff;border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,0.08);padding:40px;width:100%;max-width:400px;">
+            <h1 style="font-size:28px;font-weight:700;margin:0 0 4px 0;color:#1d1d1f;">Авагар</h1>
+            <div style="color:#86868b;font-size:14px;margin-bottom:28px;">Финансовый учет</div>
+            <form id="login-form">
+              <label style="display:block;font-size:13px;color:#86868b;margin-bottom:6px;">Email</label>
+              <input id="login-email" type="email" required autocomplete="username" style="width:100%;padding:12px 14px;border:1px solid #d2d2d7;border-radius:10px;font-size:15px;margin-bottom:16px;box-sizing:border-box;">
+              <label style="display:block;font-size:13px;color:#86868b;margin-bottom:6px;">Пароль</label>
+              <input id="login-password" type="password" required autocomplete="current-password" style="width:100%;padding:12px 14px;border:1px solid #d2d2d7;border-radius:10px;font-size:15px;margin-bottom:20px;box-sizing:border-box;">
+              <div id="login-error" style="color:#FF3B30;font-size:13px;margin-bottom:12px;min-height:18px;">${errorMsg||''}</div>
+              <button id="login-btn" type="submit" style="width:100%;padding:13px;background:#0066CC;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">Войти</button>
+            </form>
+          </div>
+        </div>`;
+      const form = document.getElementById('login-form');
+      const btn = document.getElementById('login-btn');
+      const errEl = document.getElementById('login-error');
+      form.addEventListener('submit', async function(e){
+        e.preventDefault();
+        btn.disabled = true; btn.textContent = 'Вход...';
+        errEl.textContent = '';
+        try {
+          const email = document.getElementById('login-email').value.trim();
+          const password = document.getElementById('login-password').value;
+          await signIn(email, password);
+          location.reload();
+        } catch(err){
+          errEl.textContent = 'Неверный email или пароль';
+          btn.disabled = false; btn.textContent = 'Войти';
+        }
+      });
+    }
+
+    // Загрузка данных из Supabase после входа
+    async function loadDataAndInit(){
       document.body.insertAdjacentHTML('afterbegin',
         '<div id="sb-loading" style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#0066CC;color:#fff;text-align:center;padding:10px;font-family:sans-serif;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,.2)">⏳ Загрузка данных из облака...</div>'
       );
       try {
-        const r = await fetch(SB_URL+'/rest/v1/'+TABLE+'?select=key,content,updated_at&order=updated_at.desc', {headers: {'apikey': SB_KEY, 'Authorization': 'Bearer '+SB_KEY}});
+        const r = await fetch(SB_URL+'/rest/v1/'+TABLE+'?select=key,content,updated_at&order=updated_at.desc', {headers: getHeaders()});
+        if(r.status === 401){
+          // Токен протух — разлогиним и покажем экран входа
+          setSession(null);
+          location.reload();
+          return;
+        }
         const rows = await r.json();
         if(Array.isArray(rows) && rows.length){
           const origSet = localStorage.setItem.bind(localStorage);
           const seen = new Set();
           let loaded = false;
-
-          // Строки отсортированы по updated_at DESC — первая встретившаяся строка на ключ самая свежая.
           rows.forEach(row => {
             if(!row.key || row.content === null) return;
             if(seen.has(row.key)) return;
             seen.add(row.key);
-
-            // Supabase всегда выигрывает: все локальные изменения уже были записаны в SB.
             origSet(row.key, row.content);
             loaded = true;
           });
-
-          if(loaded && window.reloadAppState){
-            window.reloadAppState();
-          }
+          if(loaded && window.reloadAppState){ window.reloadAppState(); }
         }
-      } catch(e){
-        console.warn('Supabase load error', e);
-      }
+      } catch(e){ console.warn('Supabase load error', e); }
       const el = document.getElementById('sb-loading');
       if(el) el.remove();
+    }
+
+    // Роутинг: если нет сессии — показываем логин; если есть — грузим данные
+    window.addEventListener('DOMContentLoaded', async function(){
+      if(!getSession()){
+        renderLoginScreen();
+        return;
+      }
+      await loadDataAndInit();
+      // Добавляем кнопку "Выйти" в шапку
+      const header = document.querySelector('header');
+      if(header){
+        const logoutBtn = document.createElement('button');
+        logoutBtn.textContent = 'Выйти';
+        logoutBtn.className = 'btn btn-small';
+        logoutBtn.style.cssText = 'position:absolute;right:24px;bottom:16px;background:#f5f5f7;color:#1d1d1f;border:1px solid #d2d2d7;';
+        logoutBtn.onclick = function(){ if(confirm('Выйти из системы?')) window.avagarSignOut(); };
+        header.appendChild(logoutBtn);
+      }
     });
   })();
   </script>
