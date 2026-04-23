@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Авагар – Финансовый учет</title>
 
   <!-- SUPABASE SYNC + AUTH -->
@@ -151,6 +154,7 @@
       pendingQueue.push({key, value});
     }
     window.sbSet = sbSet;
+    window.trySbSet = trySbSet;
     window.avagarSignIn = signIn;
     window.avagarSignOut = signOut;
     window.avagarHasSession = function(){ return !!getSession(); };
@@ -160,6 +164,8 @@
     window._origSetItem = origSetItem; // для использования в функциях очистки, которые обходят перехват
     // Ключи, которые нельзя затирать пустыми значениями (защита от очистки state)
     const PROTECTED_KEYS = ['calendarData','revenueData','projectsData','planData','counterparties','cellComments','collapsedSections','articles'];
+    // Ключи, которые мы активно синхронизируем в облако
+    const SYNC_KEYS = ['calendarData','revenueData','projectsData','planData','counterparties','cellComments','collapsedSections','articles'];
     function isEmptyValue(v){
       if(v === null || v === undefined) return true;
       const s = String(v).trim();
@@ -170,9 +176,89 @@
       if(key === SESSION_KEY) return;
       if(!getSession()) return;
       // Защита: если пишем пустое значение в защищённый ключ — не отправляем в облако.
-      // Пусть в облаке остаётся предыдущее непустое значение.
       if(PROTECTED_KEYS.includes(key) && isEmptyValue(value)) return;
-      sbSet(key, value);
+      // Помечаем, что ключ изменён — пусть автосинх его отправит
+      dirtyKeys.add(key);
+      // Пытаемся отправить сразу (если сеть есть)
+      try { sbSet(key, value); } catch(e){ console.warn('setItem→sbSet error', e); }
+    };
+
+    // === РЕЗЕРВНАЯ АВТОСИНХРОНИЗАЦИЯ ===
+    // На случай если перехват по каким-то причинам не сработал или sbSet упал молча.
+    // Каждые 20 секунд проходим по ключам и отправляем в облако то, что изменилось.
+    const dirtyKeys = new Set();
+    const lastSyncedValue = {}; // последнее значение, которое успешно ушло в облако
+
+    async function autoSyncAll(){
+      if(!getSession()) return;
+      for(const key of SYNC_KEYS){
+        try {
+          const current = localStorage.getItem(key);
+          if(current === null) continue;
+          // Не затираем облако пустыми значениями
+          if(PROTECTED_KEYS.includes(key) && isEmptyValue(current)) continue;
+          // Если значение не менялось с последней синхронизации — пропускаем
+          if(lastSyncedValue[key] === current) continue;
+          // Отправляем в облако напрямую (в обход перехвата)
+          const ok = await (window.trySbSet ? window.trySbSet(key, current, false) : sbSetDirect(key, current));
+          if(ok){
+            lastSyncedValue[key] = current;
+            dirtyKeys.delete(key);
+          }
+        } catch(e){ console.warn('autoSync error for '+key, e); }
+      }
+    }
+
+    // Прямой вызов в обход sbSet/trySbSet — на случай если они недоступны в замыкании
+    async function sbSetDirect(key, value){
+      try {
+        const r = await fetch(SB_URL + '/rest/v1/' + TABLE, {
+          method: 'POST',
+          headers: getHeaders(),
+          body: JSON.stringify({key, content: value, updated_at: new Date().toISOString()})
+        });
+        return r.ok;
+      } catch(e){ return false; }
+    }
+
+    // Запускаем автосинх каждые 20 секунд
+    setInterval(autoSyncAll, 20 * 1000);
+    // И при разгрузке страницы (если пользователь закрывает вкладку) — пытаемся отправить
+    window.addEventListener('beforeunload', function(){
+      // синхронный fetch через keepalive — доставка при закрытии
+      if(!getSession()) return;
+      for(const key of SYNC_KEYS){
+        try {
+          const current = localStorage.getItem(key);
+          if(current === null) continue;
+          if(PROTECTED_KEYS.includes(key) && isEmptyValue(current)) continue;
+          if(lastSyncedValue[key] === current) continue;
+          fetch(SB_URL + '/rest/v1/' + TABLE, {
+            method: 'POST',
+            headers: getHeaders(),
+            body: JSON.stringify({key, content: current, updated_at: new Date().toISOString()}),
+            keepalive: true
+          });
+        } catch(e){}
+      }
+    });
+
+    // Диагностический хелпер — можно в консоли вызвать window.avagarForceSync()
+    window.avagarForceSync = function(){
+      return autoSyncAll().then(()=>console.log('Force sync done')).catch(e=>console.error('Force sync error', e));
+    };
+    window.avagarSyncStatus = function(){
+      const report = {};
+      SYNC_KEYS.forEach(k => {
+        const cur = localStorage.getItem(k);
+        report[k] = {
+          local: cur ? cur.length : 0,
+          synced: lastSyncedValue[k] ? lastSyncedValue[k].length : 0,
+          dirty: dirtyKeys.has(k)
+        };
+      });
+      console.table(report);
+      return report;
     };
 
     // Фоновое обновление токена каждые 50 минут (срок жизни — 60 минут)
