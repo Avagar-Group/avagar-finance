@@ -157,10 +157,22 @@
 
     // Перехват localStorage.setItem — синхронизация в Supabase, кроме служебной сессии
     const origSetItem = localStorage.setItem.bind(localStorage);
+    window._origSetItem = origSetItem; // для использования в функциях очистки, которые обходят перехват
+    // Ключи, которые нельзя затирать пустыми значениями (защита от очистки state)
+    const PROTECTED_KEYS = ['calendarData','revenueData','projectsData','planData','counterparties','cellComments','collapsedSections','articles'];
+    function isEmptyValue(v){
+      if(v === null || v === undefined) return true;
+      const s = String(v).trim();
+      return s === '' || s === '{}' || s === '[]' || s === 'null' || s === 'undefined';
+    }
     localStorage.setItem = function(key, value){
       origSetItem(key, value);
       if(key === SESSION_KEY) return;
-      if(getSession()) sbSet(key, value);
+      if(!getSession()) return;
+      // Защита: если пишем пустое значение в защищённый ключ — не отправляем в облако.
+      // Пусть в облаке остаётся предыдущее непустое значение.
+      if(PROTECTED_KEYS.includes(key) && isEmptyValue(value)) return;
+      sbSet(key, value);
     };
 
     // Фоновое обновление токена каждые 50 минут (срок жизни — 60 минут)
@@ -2537,11 +2549,14 @@
                 toClear.push(['cellComments', JSON.stringify({})]);
             }
 
-            // Сохраняем локально сразу (origSetItem в обёртке синхронен)
-            toClear.forEach(([k, v]) => localStorage.setItem(k, v));
+            // Сохраняем локально напрямую (в обход перехвата, иначе защита PROTECTED_KEYS
+            // не даст записать пустые значения)
+            const origSet = window._origSetItem || localStorage.setItem.bind(localStorage);
+            toClear.forEach(([k, v]) => {
+                try { origSet(k, v); } catch(e){ localStorage.setItem(k, v); }
+            });
 
-            // Ждём, пока пустые значения улетят в Supabase — иначе после перезагрузки
-            // облако вернёт старые данные
+            // Отправляем пустые значения в Supabase напрямую через sbSet (защита в перехвате не мешает)
             if (window.sbSet) {
                 try {
                     await Promise.all(toClear.map(([k, v]) => window.sbSet(k, v)));
@@ -2694,9 +2709,9 @@
         function getCounterparties() {
             const stored = localStorage.getItem('counterparties');
             if (stored) return JSON.parse(stored);
-            
+
             // Начальный справочник из загруженного файла
-            return [
+            const defaults = [
                 {
                     id: 'cp1',
                     name: 'МЕГАФОН ПАО',
@@ -2719,6 +2734,10 @@
                     hasVat: true
                 }
             ];
+            // Записываем в localStorage чтобы они попали в Supabase при следующей записи пользователя
+            // и были доступны при перезагрузке страницы
+            localStorage.setItem('counterparties', JSON.stringify(defaults));
+            return defaults;
         }
         
         function saveCounterparties(counterparties) {
