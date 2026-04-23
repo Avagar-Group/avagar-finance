@@ -749,7 +749,7 @@
         <header style="position: relative;">
             <h1>Авагар</h1>
             <div style="color: var(--text-secondary); font-size: 14px; margin-top: 4px;">Финансовый учет</div>
-            <button onclick="openUploadModal()" class="btn btn-small" style="position: absolute; right: 24px; top: 50%; transform: translateY(-50%);">
+            <button onclick="openUploadModal()" class="btn btn-small" style="position: absolute; right: 24px; top: 24px;">
                 ⬆️ Загрузка данных
             </button>
         </header>
@@ -4921,13 +4921,39 @@
             const existingProjects = (appState.projectsData || []).map(p => p.name);
             const fmt = (v) => v.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-            // Инициализируем projectName для каждой строки однократно (точное совпадение по имени).
-            // Слабое совпадение через includes намеренно не используем — оно создавало ложные матчи.
+            // Инициализируем projectName для каждой строки однократно.
+            // Ищем в 3 источниках: проекты → справочник контрагентов (основное имя и варианты) → сам objectName.
+            const counterparties = getCounterparties();
             salaryData.forEach(obj => {
                 if (!obj.projectName) {
-                    const exact = existingProjects.find(pn => pn.toLowerCase() === (obj.objectName || '').toLowerCase());
-                    obj.projectName = exact || obj.objectName;
-                    obj.projectMatched = !!exact;
+                    const objNameLower = (obj.objectName || '').toLowerCase().trim();
+
+                    // 1. Точное совпадение с существующим проектом
+                    const exact = existingProjects.find(pn => pn.toLowerCase() === objNameLower);
+                    if (exact) {
+                        obj.projectName = exact;
+                        obj.projectMatched = true;
+                        return;
+                    }
+
+                    // 2. Ищем в справочнике контрагентов (основное имя или варианты)
+                    const cpMatch = counterparties.find(cp => {
+                        if (!cp.project) return false;
+                        if ((cp.name || '').toLowerCase().trim() === objNameLower) return true;
+                        if (Array.isArray(cp.variants)) {
+                            return cp.variants.some(v => (v || '').toLowerCase().trim() === objNameLower);
+                        }
+                        return false;
+                    });
+                    if (cpMatch && cpMatch.project) {
+                        obj.projectName = cpMatch.project;
+                        obj.projectMatched = true;
+                        return;
+                    }
+
+                    // 3. Ничего не нашли — ставим сам objectName, отмечаем как непривязанный
+                    obj.projectName = obj.objectName;
+                    obj.projectMatched = false;
                 }
             });
 
