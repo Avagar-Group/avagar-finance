@@ -67,13 +67,88 @@
       location.reload();
     }
 
-    // Save to Supabase
-    function sbSet(key, value){
-      return fetch(SB_URL+'/rest/v1/'+TABLE, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({key, content: value, updated_at: new Date().toISOString()})
-      }).catch(()=>{});
+    // Индикатор синхронизации
+    function setSyncStatus(state, message){
+      const el = document.getElementById('sync-indicator');
+      if(!el) return;
+      if(state === 'saving'){ el.style.background = '#FF9500'; el.textContent = '⏳ Сохранение...'; }
+      else if(state === 'saved'){ el.style.background = '#34C759'; el.textContent = '✓ Сохранено'; setTimeout(()=>{ if(el.textContent==='✓ Сохранено'){ el.style.background='#86868b'; el.textContent='☁ Синхронизировано'; } }, 1500); }
+      else if(state === 'error'){ el.style.background = '#FF3B30'; el.textContent = '⚠ ' + (message || 'Ошибка сохранения'); }
+      else if(state === 'idle'){ el.style.background = '#86868b'; el.textContent = '☁ Синхронизировано'; }
+    }
+    window.setSyncStatus = setSyncStatus;
+
+    // Обновление токена через refresh_token
+    async function refreshToken(){
+      const s = getSession();
+      if(!s || !s.refresh_token) return null;
+      try {
+        const r = await fetch(SB_URL + '/auth/v1/token?grant_type=refresh_token', {
+          method: 'POST',
+          headers: {'apikey': SB_KEY, 'Content-Type': 'application/json'},
+          body: JSON.stringify({refresh_token: s.refresh_token})
+        });
+        if(!r.ok) return null;
+        const data = await r.json();
+        setSession(data);
+        return data;
+      } catch(e){ return null; }
+    }
+
+    // Очередь неотправленных записей
+    const pendingQueue = [];
+    let flushing = false;
+
+    async function flushPending(){
+      if(flushing) return;
+      flushing = true;
+      while(pendingQueue.length){
+        const item = pendingQueue[0];
+        const ok = await trySbSet(item.key, item.value, true);
+        if(ok) pendingQueue.shift();
+        else { flushing = false; return; }
+      }
+      flushing = false;
+      if(document.getElementById('sync-indicator')) setSyncStatus('saved');
+    }
+
+    async function trySbSet(key, value, isRetry){
+      try {
+        let r = await fetch(SB_URL+'/rest/v1/'+TABLE, {
+          method: 'POST',
+          headers: getHeaders(),
+          body: JSON.stringify({key, content: value, updated_at: new Date().toISOString()})
+        });
+        if(r.status === 401 || r.status === 403){
+          // Токен протух — пробуем обновить
+          const refreshed = await refreshToken();
+          if(!refreshed){
+            setSyncStatus('error', 'Сессия истекла — войдите заново');
+            return false;
+          }
+          r = await fetch(SB_URL+'/rest/v1/'+TABLE, {
+            method: 'POST',
+            headers: getHeaders(),
+            body: JSON.stringify({key, content: value, updated_at: new Date().toISOString()})
+          });
+        }
+        if(!r.ok){ if(!isRetry) setSyncStatus('error', 'Не удалось сохранить ('+r.status+')'); return false; }
+        return true;
+      } catch(e){
+        if(!isRetry) setSyncStatus('error', 'Нет связи с облаком');
+        return false;
+      }
+    }
+
+    // Save to Supabase — с обработкой ошибок, очередью и индикатором
+    async function sbSet(key, value){
+      setSyncStatus('saving');
+      const ok = await trySbSet(key, value, false);
+      if(ok){ setSyncStatus('saved'); return; }
+      // Складываем в очередь для повторной попытки
+      // Перед добавлением убираем из очереди старое значение этого же ключа, чтобы не копить дубли
+      for(let i = pendingQueue.length - 1; i >= 0; i--){ if(pendingQueue[i].key === key) pendingQueue.splice(i, 1); }
+      pendingQueue.push({key, value});
     }
     window.sbSet = sbSet;
     window.avagarSignIn = signIn;
@@ -87,6 +162,22 @@
       if(key === SESSION_KEY) return;
       if(getSession()) sbSet(key, value);
     };
+
+    // Фоновое обновление токена каждые 50 минут (срок жизни — 60 минут)
+    setInterval(refreshToken, 50 * 60 * 1000);
+
+    // Повторная попытка отправить очередь при восстановлении связи
+    window.addEventListener('online', flushPending);
+    setInterval(() => { if(pendingQueue.length) flushPending(); }, 30000);
+
+    // Предупреждение при закрытии вкладки, если есть несохранённое
+    window.addEventListener('beforeunload', function(e){
+      if(pendingQueue.length){
+        e.preventDefault();
+        e.returnValue = 'Не все изменения сохранены в облако. Точно закрыть?';
+        return e.returnValue;
+      }
+    });
 
     // UI экрана входа
     function renderLoginScreen(errorMsg){
@@ -166,6 +257,13 @@
       // Добавляем кнопку "Выйти" в шапку
       const header = document.querySelector('header');
       if(header){
+        // Индикатор синхронизации
+        const syncEl = document.createElement('div');
+        syncEl.id = 'sync-indicator';
+        syncEl.style.cssText = 'position:absolute;right:110px;bottom:18px;background:#86868b;color:#fff;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:500;user-select:none;';
+        syncEl.textContent = '☁ Синхронизировано';
+        header.appendChild(syncEl);
+
         const logoutBtn = document.createElement('button');
         logoutBtn.textContent = 'Выйти';
         logoutBtn.className = 'btn btn-small';
