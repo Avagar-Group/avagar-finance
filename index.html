@@ -2794,36 +2794,18 @@
         
         function getCounterparties() {
             const stored = localStorage.getItem('counterparties');
-            if (stored) return JSON.parse(stored);
-
-            // Начальный справочник из загруженного файла
-            const defaults = [
-                {
-                    id: 'cp1',
-                    name: 'МЕГАФОН ПАО',
-                    variants: ['Мегафон', 'ПАО Мегафон', 'МЕГАФОН'],
-                    article: 'megafon',
-                    hasVat: true
-                },
-                {
-                    id: 'cp2',
-                    name: 'Контадор ООО',
-                    variants: ['Contador', 'ООО Контадор', 'КОНТАДОР'],
-                    article: 'accounting',
-                    hasVat: false
-                },
-                {
-                    id: 'cp3',
-                    name: 'КОМУС ООО',
-                    variants: ['Komus', 'Комус', 'ООО КОМУС'],
-                    article: 'komus',
-                    hasVat: true
-                }
-            ];
-            // Записываем в localStorage чтобы они попали в Supabase при следующей записи пользователя
-            // и были доступны при перезагрузке страницы
-            localStorage.setItem('counterparties', JSON.stringify(defaults));
-            return defaults;
+            if (stored) {
+                try {
+                    const parsed = JSON.parse(stored);
+                    if (Array.isArray(parsed)) return parsed;
+                } catch(e) {}
+            }
+            // Если в localStorage пусто — возвращаем пустой массив.
+            // НЕ записываем дефолтных контрагентов в localStorage, потому что:
+            // 1) автосинх тут же отправит их в облако и затрёт настоящих
+            // 2) если облако ещё не успело загрузиться — мы потеряем все данные
+            // Дефолтных контрагентов больше не используем — пользователь сам заводит.
+            return [];
         }
         
         function saveCounterparties(counterparties) {
