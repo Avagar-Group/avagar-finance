@@ -6190,7 +6190,9 @@
             });
 
             // Считаем выручку и расходы из calendarData
+            // ВАЖНО: банковские операции (source='bank') в юнит-экономику не идут — они только в платежном календаре
             appState.calendarData.forEach(t => {
+                if (t.source === 'bank') return;
                 const tYear = t.date.substring(0, 4);
                 const tMonth = t.date.substring(5, 7);
                 if (tYear !== year) return;
@@ -6616,6 +6618,8 @@
             });
 
             appState.calendarData.forEach(t => {
+                // Банковские операции не идут в проекты — они только в платежном календаре
+                if (t.source === 'bank') return;
                 let projName = t.project || null;
                 if (!projName) {
                     const cp = findCounterpartyMatch(t.counterparty);
@@ -6879,7 +6883,9 @@
             const artName = artDef ? artDef.name : articleKey;
 
             // Ищем операции из calendarData с этим articleKey за этот месяц
+            // ВАЖНО: банковские операции в ОПУ-детализацию не идут — они только в платежном календаре
             const ops = appState.calendarData.filter(t => {
+                if (t.source === 'bank') return false;
                 return t.date.startsWith(monthKey) && t.articleKey === articleKey;
             });
 
@@ -6983,6 +6989,8 @@
             });
 
             const ops = appState.calendarData.filter(t => {
+                // Банковские операции в юнит-экономику не показываем — они только в платежном календаре
+                if (t.source === 'bank') return false;
                 // Если у операции явно задан проект — учитываем только совпадение с текущим.
                 // Это важно после перемещения между проектами: нельзя показывать операцию в обоих.
                 if (t.project) {
