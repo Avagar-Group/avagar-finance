@@ -20,12 +20,18 @@
     function getHeaders(extra){
       const session = getSession();
       const token = session && session.access_token ? session.access_token : SB_KEY;
-      return Object.assign({
+      const base = {
         'apikey': SB_KEY,
         'Authorization': 'Bearer ' + token,
         'Content-Type': 'application/json',
-        'Prefer': 'resolution=merge-duplicates'
-      }, extra || {});
+        'Prefer': 'resolution=merge-duplicates,return=representation'
+      };
+      const merged = Object.assign({}, base, extra || {});
+      // Если в extra пришёл свой Prefer — соединяем оба значения через запятую
+      if (extra && extra.Prefer && base.Prefer && extra.Prefer !== base.Prefer) {
+        merged.Prefer = base.Prefer + ',' + extra.Prefer;
+      }
+      return merged;
     }
 
     function getSession(){
@@ -101,6 +107,9 @@
     // Очередь неотправленных записей
     const pendingQueue = [];
     let flushing = false;
+    // Карта: ключ → updated_at известный нам с сервера. Используется для compare-and-swap,
+    // чтобы не затирать данные, обновлённые с другого устройства.
+    const lastServerUpdatedAt = {};
 
     async function flushPending(){
       if(flushing) return;
@@ -115,8 +124,33 @@
       if(document.getElementById('sync-indicator')) setSyncStatus('saved');
     }
 
-    async function trySbSet(key, value, isRetry){
+    // Получить с сервера актуальный updated_at для конкретного ключа (или null если ключа нет)
+    async function fetchServerTs(key){
       try {
+        const r = await fetch(SB_URL+'/rest/v1/'+TABLE+'?select=updated_at&key=eq.'+encodeURIComponent(key), {headers: getHeaders()});
+        if(!r.ok) return null;
+        const arr = await r.json();
+        if(Array.isArray(arr) && arr.length > 0) return arr[0].updated_at;
+        return null;
+      } catch(e){ return null; }
+    }
+
+    async function trySbSet(key, value, isRetry, options){
+      options = options || {};
+      const skipPreCheck = !!options.skipPreCheck;
+      try {
+        // PRE-CHECK: если в облаке версия новее, чем мы видели в последний раз —
+        // это значит другое устройство уже что-то обновило. Не затираем — отказываемся.
+        if (!skipPreCheck) {
+          const cloudTs = await fetchServerTs(key);
+          const lastSeen = lastServerUpdatedAt[key];
+          if (cloudTs && lastSeen && new Date(cloudTs) > new Date(lastSeen)) {
+            // В облаке более свежие данные. Тянем их и оставляем локальное в очереди.
+            try { await pollCloudUpdates(); } catch(e){}
+            if (!isRetry) setSyncStatus('error', '⚠ Данные обновлены с другого устройства — изменения отложены');
+            return false;
+          }
+        }
         let r = await fetch(SB_URL+'/rest/v1/'+TABLE, {
           method: 'POST',
           headers: getHeaders(),
@@ -136,6 +170,14 @@
           });
         }
         if(!r.ok){ if(!isRetry) setSyncStatus('error', 'Не удалось сохранить ('+r.status+')'); return false; }
+        // Запоминаем актуальный updated_at, который вернул сервер, чтобы в следующий раз pre-check работал
+        try {
+          const data = await r.json();
+          if (Array.isArray(data) && data.length > 0 && data[0].updated_at) {
+            lastServerUpdatedAt[key] = data[0].updated_at;
+          }
+        } catch(e){}
+        lastSyncedValue[key] = value;
         return true;
       } catch(e){
         if(!isRetry) setSyncStatus('error', 'Нет связи с облаком');
@@ -153,8 +195,19 @@
       for(let i = pendingQueue.length - 1; i >= 0; i--){ if(pendingQueue[i].key === key) pendingQueue.splice(i, 1); }
       pendingQueue.push({key, value});
     }
+
+    // Принудительная запись (после разрешения конфликта вручную в пользу локального значения)
+    async function sbSetForce(key, value){
+      setSyncStatus('saving');
+      // Сбрасываем lastServerUpdatedAt, чтобы pre-check не блокировал — но всё равно передаём skipPreCheck
+      const ok = await trySbSet(key, value, false, {skipPreCheck: true});
+      if(ok) setSyncStatus('saved');
+      return ok;
+    }
+
     window.sbSet = sbSet;
     window.trySbSet = trySbSet;
+    window.sbSetForce = sbSetForce;
     window.avagarSignIn = signIn;
     window.avagarSignOut = signOut;
     window.avagarHasSession = function(){ return !!getSession(); };
@@ -223,6 +276,120 @@
 
     // Запускаем автосинх каждые 20 секунд
     setInterval(autoSyncAll, 20 * 1000);
+
+    // === ПОЛЛИНГ ВХОДЯЩИХ ИЗМЕНЕНИЙ С ОБЛАКА ===
+    // Каждые 10 секунд проверяем не обновил ли кто-то данные с другого устройства.
+    // Если обновил — затягиваем себе и перерисовываем UI. Это решает проблему,
+    // когда два компьютера работают одновременно и более старая версия затирала более новую.
+    let pollInFlight = false;
+    let conflictDialogOpen = false;
+
+    async function pollCloudUpdates(){
+      if(!getSession()) return;
+      if(pollInFlight) return;
+      pollInFlight = true;
+      try {
+        const r = await fetch(SB_URL+'/rest/v1/'+TABLE+'?select=key,content,updated_at&order=updated_at.desc', {headers: getHeaders()});
+        if(!r.ok){ pollInFlight = false; return; }
+        const rows = await r.json();
+        if(!Array.isArray(rows)){ pollInFlight = false; return; }
+
+        const seen = new Set();
+        const pulled = [];
+        const conflicted = [];
+
+        for(const row of rows){
+          if(!row.key || row.content === null) continue;
+          if(seen.has(row.key)) continue;
+          seen.add(row.key);
+
+          const lastSeenTs = lastServerUpdatedAt[row.key];
+          const cloudTs = row.updated_at;
+          if(lastSeenTs && new Date(cloudTs) <= new Date(lastSeenTs)) continue; // ничего нового
+
+          const localRaw = localStorage.getItem(row.key);
+
+          // Если содержимое совпадает — просто фиксируем timestamp
+          if(localRaw === row.content){
+            lastServerUpdatedAt[row.key] = cloudTs;
+            lastSyncedValue[row.key] = row.content;
+            continue;
+          }
+
+          // Облако отличается. Есть ли локальные правки?
+          // Считаем правки локальными если текущее значение в LS ≠ последнему успешно отправленному.
+          const haveLocalUnsavedChanges = (lastSyncedValue[row.key] !== undefined && lastSyncedValue[row.key] !== localRaw);
+
+          if(!haveLocalUnsavedChanges){
+            // Безопасно затягиваем — у нас не было своих правок поверх старой версии
+            origSetItem(row.key, row.content);
+            lastServerUpdatedAt[row.key] = cloudTs;
+            lastSyncedValue[row.key] = row.content;
+            pulled.push(row.key);
+          } else {
+            // Конфликт: и у нас, и в облаке есть несовпадающие правки
+            conflicted.push({key: row.key, cloud: row.content, cloudTs: cloudTs, local: localRaw});
+          }
+        }
+
+        if(pulled.length > 0){
+          console.log('[sync] подтянули с облака:', pulled);
+          if(window.reloadAppState) window.reloadAppState();
+          const el = document.getElementById('sync-indicator');
+          if(el){
+            el.style.background = '#0066CC';
+            el.textContent = '⬇ Обновлено с другого устройства';
+            setTimeout(()=>{ if(el.textContent.indexOf('Обновлено')>=0) setSyncStatus('idle'); }, 2500);
+          }
+        }
+
+        if(conflicted.length > 0 && !conflictDialogOpen){
+          conflictDialogOpen = true;
+          const labels = {
+            calendarData: 'Платежный календарь / реестр',
+            revenueData: 'Выручка и зарплаты',
+            projectsData: 'Проекты',
+            planData: 'Планы',
+            counterparties: 'Контрагенты',
+            cellComments: 'Комментарии',
+            collapsedSections: 'Свёрнутые секции',
+            articles: 'Статьи ОПУ'
+          };
+          const keysList = conflicted.map(c => labels[c.key] || c.key).join(', ');
+          const wantCloud = window.confirm(
+            '⚠ КОНФЛИКТ ДАННЫХ\n\n' +
+            'Эти данные изменены на другом устройстве, и одновременно у вас есть несохранённые правки:\n' +
+            '— ' + keysList + '\n\n' +
+            'OK   — взять версию ИЗ ОБЛАКА (ваши локальные правки потеряются)\n' +
+            'Отмена — оставить ВАШИ правки и перезаписать облако (правки с другого устройства потеряются)'
+          );
+
+          if(wantCloud){
+            conflicted.forEach(c => {
+              origSetItem(c.key, c.cloud);
+              lastServerUpdatedAt[c.key] = c.cloudTs;
+              lastSyncedValue[c.key] = c.cloud;
+            });
+            if(window.reloadAppState) window.reloadAppState();
+          } else {
+            // Перезаписываем облако своими данными — обновляем lastServerUpdatedAt
+            // чтобы pre-check пропустил, и шлём принудительно
+            for(const c of conflicted){
+              lastServerUpdatedAt[c.key] = c.cloudTs;
+              const localRaw = localStorage.getItem(c.key);
+              if(localRaw !== null){
+                await sbSetForce(c.key, localRaw);
+              }
+            }
+          }
+          conflictDialogOpen = false;
+        }
+      } catch(e){ console.warn('pollCloudUpdates error', e); }
+      pollInFlight = false;
+    }
+
+    window.pollCloudUpdates = pollCloudUpdates;
+    setInterval(pollCloudUpdates, 10 * 1000);
     // И при разгрузке страницы (если пользователь закрывает вкладку) — пытаемся отправить
     window.addEventListener('beforeunload', function(){
       // синхронный fetch через keepalive — доставка при закрытии
@@ -336,6 +503,10 @@
             if(seen.has(row.key)) return;
             seen.add(row.key);
             origSet(row.key, row.content);
+            // Запоминаем серверный updated_at и последнее успешно синхронизированное значение —
+            // это базовая точка для conflict detection и поллинга.
+            if(row.updated_at) lastServerUpdatedAt[row.key] = row.updated_at;
+            lastSyncedValue[row.key] = row.content;
             loaded = true;
           });
           if(loaded && window.reloadAppState){ window.reloadAppState(); }
@@ -1010,8 +1181,21 @@
                     <option value="2026" selected>2026</option>
                     <option value="2025">2025</option>
                 </select>
-                <!-- Фильтр по месяцам убран -->
-                <input type="hidden" id="unitMonth" value="">
+                <select id="unitMonth" onchange="updateUnitEconomics()">
+                    <option value="">Весь год</option>
+                    <option value="01">Январь</option>
+                    <option value="02">Февраль</option>
+                    <option value="03">Март</option>
+                    <option value="04">Апрель</option>
+                    <option value="05">Май</option>
+                    <option value="06">Июнь</option>
+                    <option value="07">Июль</option>
+                    <option value="08">Август</option>
+                    <option value="09">Сентябрь</option>
+                    <option value="10">Октябрь</option>
+                    <option value="11">Ноябрь</option>
+                    <option value="12">Декабрь</option>
+                </select>
                 <input type="text" id="unitSearch" placeholder="Поиск проекта..."
                     oninput="updateUnitEconomics()" style="padding:8px 12px; border:1px solid var(--border); border-radius:6px; width:200px;">
                 <select id="unitSort" onchange="updateUnitEconomics()">
@@ -1032,9 +1216,8 @@
                                 <th style="text-align: right;">Себестоимость</th>
                                 <th style="text-align: right;">Маржа</th>
                                 <th style="text-align: right;">Маржа, %</th>
-                                <th style="text-align: right;">Чистая прибыль</th>
-                                <th style="text-align: right;">ЧП, %</th>
                                 <th style="text-align: right;">Сотрудников</th>
+                                <th style="text-align: right;">Ср. маржа / чел.</th>
                             </tr>
                         </thead>
                         <tbody id="unitTableBody"></tbody>
@@ -1806,8 +1989,8 @@
                         
                         
                         
-                        // МАРЖИНАЛЬНАЯ ПРИБЫЛЬ
-                        tbody += '<tr class="opu-total"><td>Маржинальная прибыль</td>';
+                        // МАРЖИНАЛЬНАЯ ПРИБЫЛЬ — клик открывает разбивку
+                        tbody += `<tr class="opu-total" style="cursor:pointer;" onclick="showMarginBreakdown('${year}','${period}')" title="Нажмите, чтобы увидеть из чего складывается маржа"><td>Маржинальная прибыль 🔍</td>`;
                         let totalMargin = 0;
                         months.forEach(m => {
                             const margin = revenueTotal[m] - costTotal[m];
@@ -6231,30 +6414,21 @@
             else if (sortBy === 'margin') projects.sort((a, b) => (b.revenue - b.costs) - (a.revenue - a.costs));
 
             if (projects.length === 0) {
-                document.getElementById('unitTableBody').innerHTML = '<tr><td colspan="8" style="text-align:center; padding:40px; color:var(--text-secondary);">Нет данных за выбранный период</td></tr>';
+                document.getElementById('unitTableBody').innerHTML = '<tr><td colspan="7" style="text-align:center; padding:40px; color:var(--text-secondary);">Нет данных за выбранный период</td></tr>';
                 return;
             }
 
-            const totalRevenue = projects.reduce((s, p) => s + p.revenue, 0);
-            const taxRate = 0.06;
-            const indirectCostsTotal = totalRevenue * 0.05;
-
             let html = '';
-            let totalRow = { revenue: 0, costs: 0, margin: 0, netProfit: 0, employees: 0 };
+            let totalRow = { revenue: 0, costs: 0, margin: 0, employees: 0 };
 
             projects.forEach(project => {
                 const margin = project.revenue - project.costs;
                 const marginPercent = project.revenue > 0 ? (margin / project.revenue * 100) : 0;
-                const projectShare = totalRevenue > 0 ? (project.revenue / totalRevenue) : 0;
-                const tax = project.revenue * taxRate;
-                const indirectCosts = indirectCostsTotal * projectShare;
-                const netProfit = margin - tax - indirectCosts;
-                const netProfitPercent = project.revenue > 0 ? (netProfit / project.revenue * 100) : 0;
+                const avgMarginPerEmp = project.employees > 0 ? (margin / project.employees) : 0;
 
                 totalRow.revenue += project.revenue;
                 totalRow.costs += project.costs;
                 totalRow.margin += margin;
-                totalRow.netProfit += netProfit;
                 totalRow.employees += project.employees;
 
                 const safeName = project.name.replace(/'/g, "\\'");
@@ -6265,15 +6439,14 @@
                         <td style="text-align:right; color:var(--danger); text-decoration:underline;">${formatMoney(project.costs)}</td>
                         <td style="text-align:right; ${margin>=0?'color:var(--success);':'color:var(--danger);'} font-weight:600;">${formatMoney(margin)}</td>
                         <td style="text-align:right; ${marginPercent>=0?'color:var(--success);':'color:var(--danger);'}">${formatPercent(marginPercent)}</td>
-                        <td style="text-align:right; ${netProfit>=0?'color:var(--success);':'color:var(--danger);'} font-weight:700;">${formatMoney(netProfit)}</td>
-                        <td style="text-align:right; ${netProfitPercent>=0?'color:var(--success);':'color:var(--danger);'}">${formatPercent(netProfitPercent)}</td>
                         <td style="text-align:right;">${project.employees}</td>
+                        <td style="text-align:right; ${avgMarginPerEmp>=0?'color:var(--success);':'color:var(--danger);'}">${formatMoney(avgMarginPerEmp)}</td>
                     </tr>
                 `;
             });
 
             const tmPct = totalRow.revenue > 0 ? (totalRow.margin / totalRow.revenue * 100) : 0;
-            const tnpPct = totalRow.revenue > 0 ? (totalRow.netProfit / totalRow.revenue * 100) : 0;
+            const totalAvgMarginPerEmp = totalRow.employees > 0 ? (totalRow.margin / totalRow.employees) : 0;
             html += `
                 <tr style="border-top:3px solid var(--text-primary); background:var(--bg-secondary); font-weight:700;">
                     <td>ИТОГО (${projects.length})</td>
@@ -6281,9 +6454,8 @@
                     <td style="text-align:right; color:var(--danger);">${formatMoney(totalRow.costs)}</td>
                     <td style="text-align:right; ${totalRow.margin>=0?'color:var(--success);':'color:var(--danger);'}">${formatMoney(totalRow.margin)}</td>
                     <td style="text-align:right;">${formatPercent(tmPct)}</td>
-                    <td style="text-align:right; ${totalRow.netProfit>=0?'color:var(--success);':'color:var(--danger);'}">${formatMoney(totalRow.netProfit)}</td>
-                    <td style="text-align:right;">${formatPercent(tnpPct)}</td>
                     <td style="text-align:right;">${totalRow.employees}</td>
+                    <td style="text-align:right; ${totalAvgMarginPerEmp>=0?'color:var(--success);':'color:var(--danger);'}">${formatMoney(totalAvgMarginPerEmp)}</td>
                 </tr>
             `;
 
@@ -6877,6 +7049,108 @@
             }
         }
         // === П.1 ОПУ: детализация по клику ===
+        // Разбивка "Маржинальная прибыль" = Выручка − Себестоимость по статьям
+        function showMarginBreakdown(year, period) {
+            const months = getMonthsForPeriod(period);
+            const monthlyData = {};
+            months.forEach(m => { monthlyData[m] = calculateMonthOPU(year, m); });
+
+            // Собираем статьи: всё что в секции "Выручка" — revenue, всё что в "Переменные расходы" — cost
+            const revArts = [];
+            const costArts = [];
+            let curSection = null;
+            (appState.articles || []).forEach(a => {
+                if (a.section) { curSection = a.name; return; }
+                if (!a.key) return; // подразделы без key
+                if (curSection === 'Выручка') revArts.push(a);
+                else if (curSection === 'Переменные расходы') costArts.push(a);
+            });
+
+            const monthLabel = {
+                '01':'Янв','02':'Фев','03':'Мар','04':'Апр','05':'Май','06':'Июн',
+                '07':'Июл','08':'Авг','09':'Сен','10':'Окт','11':'Ноя','12':'Дек'
+            };
+
+            const periodName = {all:'весь год', q1:'Q1', q2:'Q2', q3:'Q3', q4:'Q4'}[period] || period;
+
+            // Заголовок таблицы
+            let html = `<p style="margin-bottom:12px; color:var(--text-secondary);">Период: <strong>${year}, ${periodName}</strong>. Маржинальная прибыль = Выручка − Себестоимость.</p>`;
+            html += '<div class="table-scroll"><table style="width:100%;"><thead><tr>';
+            html += '<th style="text-align:left; padding:8px; border-bottom:2px solid var(--border);">Статья</th>';
+            months.forEach(m => { html += `<th style="text-align:right; padding:8px; border-bottom:2px solid var(--border);">${monthLabel[m]}</th>`; });
+            html += '<th style="text-align:right; padding:8px; border-bottom:2px solid var(--border);">Итого</th>';
+            html += '</tr></thead><tbody>';
+
+            // Секция: Выручка
+            html += `<tr style="background:#e3f2fd; font-weight:700;"><td style="padding:8px;" colspan="${months.length + 2}">📈 Выручка</td></tr>`;
+            const revMonthTotal = {}; months.forEach(m => revMonthTotal[m] = 0);
+            let revGrandTotal = 0;
+            revArts.forEach(a => {
+                let rowTotal = 0;
+                let row = `<tr><td style="padding:6px 8px 6px 24px;">${a.name}</td>`;
+                months.forEach(m => {
+                    const v = monthlyData[m][a.key] || 0;
+                    rowTotal += v;
+                    revMonthTotal[m] += v;
+                    row += `<td style="text-align:right; padding:6px 8px;">${formatMoney(v)}</td>`;
+                });
+                revGrandTotal += rowTotal;
+                row += `<td style="text-align:right; padding:6px 8px; font-weight:600;">${formatMoney(rowTotal)}</td></tr>`;
+                html += row;
+            });
+            html += `<tr style="background:var(--bg-secondary); font-weight:700;"><td style="padding:8px;">Итого выручка</td>`;
+            months.forEach(m => { html += `<td style="text-align:right; padding:8px;">${formatMoney(revMonthTotal[m])}</td>`; });
+            html += `<td style="text-align:right; padding:8px; color:var(--success);">${formatMoney(revGrandTotal)}</td></tr>`;
+
+            // Секция: Себестоимость
+            html += `<tr style="background:#fce4ec; font-weight:700;"><td style="padding:8px;" colspan="${months.length + 2}">📉 Себестоимость</td></tr>`;
+            const costMonthTotal = {}; months.forEach(m => costMonthTotal[m] = 0);
+            let costGrandTotal = 0;
+            costArts.forEach(a => {
+                let rowTotal = 0;
+                let row = `<tr><td style="padding:6px 8px 6px 24px;">${a.name}</td>`;
+                months.forEach(m => {
+                    const v = monthlyData[m][a.key] || 0;
+                    rowTotal += v;
+                    costMonthTotal[m] += v;
+                    row += `<td style="text-align:right; padding:6px 8px;">${formatMoney(v)}</td>`;
+                });
+                costGrandTotal += rowTotal;
+                row += `<td style="text-align:right; padding:6px 8px; font-weight:600;">${formatMoney(rowTotal)}</td></tr>`;
+                html += row;
+            });
+            html += `<tr style="background:var(--bg-secondary); font-weight:700;"><td style="padding:8px;">Итого себестоимость</td>`;
+            months.forEach(m => { html += `<td style="text-align:right; padding:8px;">${formatMoney(costMonthTotal[m])}</td>`; });
+            html += `<td style="text-align:right; padding:8px; color:var(--danger);">${formatMoney(costGrandTotal)}</td></tr>`;
+
+            // Маржа = Выручка − Себестоимость
+            html += `<tr style="background:#d4edda; font-weight:800; border-top:3px solid var(--text-primary);"><td style="padding:10px 8px;">= Маржинальная прибыль</td>`;
+            let marginTotal = 0;
+            months.forEach(m => {
+                const margin = revMonthTotal[m] - costMonthTotal[m];
+                marginTotal += margin;
+                const cl = margin >= 0 ? 'color:var(--success);' : 'color:var(--danger);';
+                html += `<td style="text-align:right; padding:10px 8px; ${cl}">${formatMoney(margin)}</td>`;
+            });
+            const cl2 = marginTotal >= 0 ? 'color:var(--success);' : 'color:var(--danger);';
+            html += `<td style="text-align:right; padding:10px 8px; ${cl2}">${formatMoney(marginTotal)}</td></tr>`;
+
+            // Маржа %
+            html += `<tr style="background:var(--bg-secondary); font-weight:600;"><td style="padding:8px;">Маржинальность, %</td>`;
+            months.forEach(m => {
+                const pct = revMonthTotal[m] > 0 ? ((revMonthTotal[m] - costMonthTotal[m]) / revMonthTotal[m] * 100) : 0;
+                html += `<td style="text-align:right; padding:8px;">${formatPercent(pct)}</td>`;
+            });
+            const totalPct = revGrandTotal > 0 ? (marginTotal / revGrandTotal * 100) : 0;
+            html += `<td style="text-align:right; padding:8px;">${formatPercent(totalPct)}</td></tr>`;
+
+            html += '</tbody></table></div>';
+
+            document.getElementById('opsDetailTitle').textContent = `Разбивка маржинальной прибыли — ${year}, ${periodName}`;
+            document.getElementById('opsDetailContent').innerHTML = html;
+            document.getElementById('opsDetailModal').classList.add('active');
+        }
+
         function showOPUDetail(articleKey, monthNum, year) {
             const monthKey = `${year}-${monthNum}`;
             const artDef = appState.articles.find(a => a.key === articleKey);
