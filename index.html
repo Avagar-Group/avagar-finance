@@ -1203,13 +1203,17 @@
                     <option value="revenue">По выручке</option>
                     <option value="margin">По марже</option>
                 </select>
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer; padding:8px 12px; background:#f5f5f5; border-radius:6px; font-size:14px;">
+                    <input type="checkbox" id="unitByMonth" onchange="updateUnitEconomics()" style="cursor:pointer;">
+                    📊 По месяцам
+                </label>
             </div>
 
             <div class="card">
                 <div class="card-title">Прибыльность по объектам</div>
                 <div class="table-scroll">
                     <table id="unitTable">
-                        <thead>
+                        <thead id="unitTableHead">
                             <tr>
                                 <th>Объект</th>
                                 <th style="text-align: right;">Выручка</th>
@@ -1362,6 +1366,7 @@
                 <button class="tab" onclick="switchUploadTab('sales')">💰 Продажи</button>
                 <button class="tab" onclick="switchUploadTab('salary')">👥 Зарплата</button>
                 <button class="tab" onclick="switchUploadTab('purchases')">🛒 Покупки</button>
+                <button class="tab" onclick="switchUploadTab('credits')">💳 Кредиты</button>
                 <button class="btn btn-secondary" onclick="clearAllData()" style="float: right; background: #dc3545; color: white; margin-top: -8px;">🗑️ Очистить все данные</button>
             </div>
             
@@ -1411,6 +1416,53 @@
                 
                 <input type="file" id="purchasesFile" accept=".xlsx,.xls" onchange="handlePurchasesUpload(event)">
                 <div id="purchasesPreview" style="margin-top: 20px;"></div>
+            </div>
+
+            <!-- Вкладка: Кредиты -->
+            <div class="upload-tab-content" id="upload-credits">
+                <h3>Кредитные платежи</h3>
+                <p style="color: var(--text-secondary); margin: 8px 0 16px;">
+                    Добавьте платежи по кредитам — они попадут в ОПУ строкой «Кредиты» под Операционной прибылью.<br>
+                    В платёжный календарь и банковскую выписку эти записи не попадают.
+                </p>
+
+                <button class="btn" onclick="openCreditModal()" style="margin-bottom: 16px;">+ Добавить кредитный платёж</button>
+
+                <div id="creditsListContainer">
+                    <!-- Список кредитов рендерится сюда -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модалка добавления кредитного платежа -->
+    <div class="modal" id="creditModal">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <span>Добавить кредитный платёж</span>
+                <button class="modal-close" onclick="document.getElementById('creditModal').classList.remove('active')">×</button>
+            </div>
+            <div style="padding: 20px;">
+                <div style="margin-bottom: 12px;">
+                    <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Дата платежа</label>
+                    <input type="date" id="creditDate" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                </div>
+                <div style="margin-bottom: 12px;">
+                    <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Сумма платежа, ₽</label>
+                    <input type="number" id="creditAmount" placeholder="0" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                </div>
+                <div style="margin-bottom: 12px;">
+                    <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Банк / контрагент</label>
+                    <input type="text" id="creditCounterparty" placeholder="Например: Сбербанк, ВТБ" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                </div>
+                <div style="margin-bottom: 20px;">
+                    <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Назначение (необязательно)</label>
+                    <input type="text" id="creditPurpose" placeholder="Например: Погашение кредита №12345" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                </div>
+                <div style="display:flex; gap:8px; justify-content:flex-end;">
+                    <button class="btn btn-secondary" onclick="document.getElementById('creditModal').classList.remove('active')">Отмена</button>
+                    <button class="btn" onclick="saveCreditPayment()">Сохранить</button>
+                </div>
             </div>
         </div>
     </div>
@@ -1547,7 +1599,6 @@
                 
                 // Себестоимость (подраздел)
                 { name: 'Себестоимость', type: 'expense', indent: true, subsection: true },
-                { name: 'Себестоимость (общая)', key: 'cost_of_sales', type: 'expense', indent: true, level: 2 },
                 { name: 'ФОТ (к выплате)', key: 'fot', type: 'expense', indent: true, level: 2 },
                 { name: 'НДФЛ', key: 'ndfl', type: 'expense', indent: true, level: 2 },
                 { name: 'Страховые взносы ПФР', key: 'pfr', type: 'expense', indent: true, level: 2 },
@@ -1556,40 +1607,31 @@
                 // ПОСТОЯННЫЕ РАСХОДЫ
                 { section: true, name: 'Постоянные расходы' },
                 
-                // Административные расходы (подраздел level 1)
-                // Итого = заправка + юр + охрана труда + мигр учет (до первого вложенного subsection)
+                // Административные расходы — плоский список, без подгрупп "Сервисы"
                 { name: 'Административные расходы', type: 'expense', indent: true, subsection: true },
-                { name: 'Заправка картриджей', key: 'cartridges', type: 'expense', indent: true, level: 2 },
+                { name: 'Аренда офиса', key: 'rent', type: 'expense', indent: true, level: 2 },
+                { name: 'Бухгалтерия', key: 'accounting', type: 'expense', indent: true, level: 2 },
+                { name: '1C', key: '1c', type: 'expense', indent: true, level: 2 },
+                { name: 'AmoCRM', key: 'amocrm', type: 'expense', indent: true, level: 2 },
+                { name: 'Интернет и связь', key: 'internet', type: 'expense', indent: true, level: 2 },
+                { name: 'Инфо сервисы', key: 'info_services', type: 'expense', indent: true, level: 2 },
                 { name: 'Юридические расходы', key: 'legal', type: 'expense', indent: true, level: 2 },
+                { name: 'Заправка картриджей', key: 'cartridges', type: 'expense', indent: true, level: 2 },
+                { name: 'Бензин', key: 'fuel', type: 'expense', indent: true, level: 2 },
                 { name: 'Охрана труда', key: 'labor_safety', type: 'expense', indent: true, level: 2 },
                 { name: 'Миграционный учет', key: 'migration', type: 'expense', indent: true, level: 2 },
-                // Офисные сотрудники: ФОТ + НДФЛ + ПФР + ФСС (без охраны труда)
+                // Маркетинг — одна строка без раскрытия. Логика подсчёта: суммирует ads+yandex_budget+yandex_contractor
+                { name: 'Маркетинг', key: 'marketing_total', type: 'expense', indent: true, level: 2, virtual: true, virtualKeys: ['ads','yandex_budget','yandex_contractor'] },
+                // Прочее — одна строка без раскрытия. Логика подсчёта: суммирует other+one_time
+                { name: 'Прочее', key: 'other_total', type: 'expense', indent: true, level: 2, virtual: true, virtualKeys: ['other','one_time'] },
+                // Комиссия банка — подтягивается из банковских операций с articleKey='bank_commission'
+                { name: 'Комиссия банка', key: 'bank_commission', type: 'expense', indent: true, level: 2 },
+                // Офисные сотрудники — оставляем как раскрываемую группу
                 { name: 'Офисные сотрудники', type: 'expense', indent: true, level: 2, subsection: true },
                 { name: 'ФОТ (к выплате)', key: 'office_fot', type: 'expense', indent: true, level: 3 },
                 { name: 'НДФЛ', key: 'office_ndfl', type: 'expense', indent: true, level: 3 },
                 { name: 'Страховые взносы ПФР', key: 'office_pfr', type: 'expense', indent: true, level: 3 },
                 { name: 'Страховые взносы ФСС', key: 'office_fss', type: 'expense', indent: true, level: 3 },
-                // Сервисы
-                { name: 'Сервисы', type: 'expense', indent: true, level: 2, subsection: true },
-                { name: 'AmoCRM', key: 'amocrm', type: 'expense', indent: true, level: 3 },
-                { name: '1C', key: '1c', type: 'expense', indent: true, level: 3 },
-                { name: 'Аренда офиса', key: 'rent', type: 'expense', indent: true, level: 3 },
-                { name: 'Интернет и связь', key: 'internet', type: 'expense', indent: true, level: 3 },
-                { name: 'Бухгалтерия', key: 'accounting', type: 'expense', indent: true, level: 3 },
-                { name: 'Инфо сервисы', key: 'info_services', type: 'expense', indent: true, level: 3 },
-                
-                // Маркетинг (подраздел level 1) — без миграционного учета
-                { name: 'Маркетинг', type: 'expense', indent: true, subsection: true },
-                { name: 'Реклама', key: 'ads', type: 'expense', indent: true, level: 2 },
-                { name: 'Я. Директ: бюджет', key: 'yandex_budget', type: 'expense', indent: true, level: 2 },
-                { name: 'Я. Директ: подрядчик', key: 'yandex_contractor', type: 'expense', indent: true, level: 2 },
-
-                // Прочее (подраздел level 1)
-                { name: 'Прочее', type: 'expense', indent: true, subsection: true },
-                { name: 'Прочее (общее)', key: 'other', type: 'expense', indent: true, level: 2 },
-                { name: 'Бензин', key: 'fuel', type: 'expense', indent: true, level: 2 },
-                { name: 'Комиссия банка', key: 'bank_commission', type: 'expense', indent: true, level: 2 },
-                { name: 'Разовая оплата', key: 'one_time', type: 'expense', indent: true, level: 2 },
 
                 // ЛИЗИНГ И КРЕДИТЫ — отдельная секция, ниже операционной прибыли
                 { section: true, name: 'Лизинг и кредиты' },
@@ -1694,6 +1736,16 @@
                 minimumFractionDigits: 0,
                 maximumFractionDigits: 0
             }).format(value) + ' ₽';
+        }
+
+        // Возвращает true, если статья является "подключом" виртуальной (Маркетинг/Прочее)
+        // Такие статьи не должны отображаться в ОПУ отдельной строкой — они свёрнуты в виртуальную
+        function isHiddenSubKey(articleKey) {
+            if (!articleKey) return false;
+            for (const a of appState.articles) {
+                if (a.virtual && Array.isArray(a.virtualKeys) && a.virtualKeys.includes(articleKey)) return true;
+            }
+            return false;
         }
         
         function formatPercent(value) {
@@ -1950,6 +2002,10 @@
             });
             
             appState.articles.forEach((article, index) => {
+                // Подключи виртуальных статей (Реклама/ЯДирект под Маркетингом, Прочее_общее/Разовая под Прочее)
+                // в таблице ОПУ не показываем — они свёрнуты в виртуальной строке
+                if (article.key && isHiddenSubKey(article.key)) return;
+
                 if (article.section) {
                     // Если была предыдущая секция - показываем промежуточные итоги
                     if (currentSection === 'Выручка') {
@@ -2137,7 +2193,7 @@
                         for (let j = index + 1; j < appState.articles.length; j++) {
                             const nextArticle = appState.articles[j];
                             if (nextArticle.section || nextArticle.subsection) break; // Встретили новый раздел
-                            if (nextArticle.key) { // У статьи есть ключ - значит есть данные
+                            if (nextArticle.key && !isHiddenSubKey(nextArticle.key)) { // У статьи есть ключ и она не "подключ виртуальной"
                                 months.forEach(m => {
                                     const value = monthlyData[m][nextArticle.key] || 0;
                                     subsectionTotals[m] += value;
@@ -2269,11 +2325,27 @@
                 if (t.source === 'sales') return;
                 // Пропускаем зарплату любого происхождения — она уже в revenueData
                 if (salaryKeys.has(t.articleKey)) return;
-                // Банковская выписка в ОПУ не попадает
-                if (t.source === 'bank') return;
+                // Банк в ОПУ почти не попадает. Исключение: комиссия банка (articleKey='bank_commission')
+                // тянется только из банковских операций — она в платежном календаре тоже остаётся
+                if (t.source === 'bank') {
+                    if (t.articleKey === 'bank_commission') {
+                        if (!result['bank_commission']) result['bank_commission'] = 0;
+                        result['bank_commission'] += t.amount || 0;
+                    }
+                    return;
+                }
 
                 if (!result[t.articleKey]) result[t.articleKey] = 0;
                 result[t.articleKey] += t.amount || 0;
+            });
+
+            // Виртуальные агрегаты: Маркетинг и Прочее = сумма своих подключей
+            appState.articles.forEach(art => {
+                if (art.virtual && Array.isArray(art.virtualKeys)) {
+                    let sum = 0;
+                    art.virtualKeys.forEach(k => { sum += result[k] || 0; });
+                    result[art.key] = sum;
+                }
             });
 
             return result;
@@ -2393,6 +2465,8 @@
             let currentSubsection = null;
             
             articles.forEach((article, index) => {
+                // Скрываем подключи виртуальных статей — они свёрнуты в "Маркетинг"/"Прочее"
+                if (article.key && isHiddenSubKey(article.key)) return;
                 if (article.section) {
                     // Заголовок секции
                     currentSection = article.name;
@@ -2860,6 +2934,105 @@
             // Переключаем контент
             document.querySelectorAll('.upload-tab-content').forEach(c => c.classList.remove('active'));
             document.getElementById('upload-' + tabName).classList.add('active');
+
+            // При открытии вкладки кредитов — отрисовать список
+            if (tabName === 'credits') renderCreditsList();
+        }
+
+        // === КРЕДИТЫ — ручное добавление ===
+
+        function openCreditModal() {
+            // Очистка формы и установка даты на сегодня
+            const today = new Date().toISOString().substring(0, 10);
+            document.getElementById('creditDate').value = today;
+            document.getElementById('creditAmount').value = '';
+            document.getElementById('creditCounterparty').value = '';
+            document.getElementById('creditPurpose').value = '';
+            document.getElementById('creditModal').classList.add('active');
+        }
+
+        function saveCreditPayment() {
+            const date = document.getElementById('creditDate').value;
+            const amount = parseFloat(document.getElementById('creditAmount').value) || 0;
+            const counterparty = document.getElementById('creditCounterparty').value.trim();
+            const purpose = document.getElementById('creditPurpose').value.trim();
+
+            if (!date) { alert('Укажите дату'); return; }
+            if (amount <= 0) { alert('Сумма должна быть больше 0'); return; }
+            if (!counterparty) { alert('Укажите банк или контрагента'); return; }
+
+            // Создаём запись с источником 'credit' — она не попадёт ни в банк, ни в платежный календарь
+            // (фильтры там работают по source === 'bank', а наши кредиты имеют source === 'credit')
+            const newOp = {
+                date: date,
+                counterparty: counterparty,
+                purpose: purpose || 'Платёж по кредиту',
+                amount: amount,
+                type: 'expense',
+                articleKey: 'credit',
+                source: 'credit',
+                id: 'credit_' + Date.now()
+            };
+
+            appState.calendarData.push(newOp);
+            localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
+            
+            document.getElementById('creditModal').classList.remove('active');
+            renderCreditsList();
+            
+            // Обновим всё что зависит от calendarData
+            if (typeof recalcDerivedData === 'function') recalcDerivedData();
+            if (typeof updateDashboard === 'function') updateDashboard();
+            
+            alert('Кредитный платёж добавлен');
+        }
+
+        function renderCreditsList() {
+            const container = document.getElementById('creditsListContainer');
+            if (!container) return;
+
+            // Все кредитные операции, отсортированы по дате (новые сверху)
+            const credits = appState.calendarData
+                .filter(t => t.source === 'credit')
+                .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+            if (credits.length === 0) {
+                container.innerHTML = '<p style="color: var(--text-secondary); padding: 20px; text-align: center; background: var(--bg-secondary); border-radius: 8px;">Кредитных платежей пока нет. Нажмите «+ Добавить кредитный платёж» выше.</p>';
+                return;
+            }
+
+            const total = credits.reduce((s, t) => s + (t.amount || 0), 0);
+
+            let html = `<div style="margin-bottom: 12px; padding: 12px; background: var(--bg-secondary); border-radius: 8px;">
+                Всего платежей: <strong>${credits.length}</strong> | Общая сумма: <strong>${formatMoney(total)}</strong>
+            </div>`;
+            html += '<div class="table-scroll"><table><thead><tr>';
+            html += '<th>Дата</th><th>Банк / контрагент</th><th>Назначение</th><th style="text-align: right;">Сумма</th><th></th>';
+            html += '</tr></thead><tbody>';
+
+            credits.forEach(c => {
+                const idx = appState.calendarData.indexOf(c);
+                const dateFmt = new Date(c.date).toLocaleDateString('ru-RU');
+                html += `<tr>
+                    <td style="white-space: nowrap;">${dateFmt}</td>
+                    <td>${c.counterparty || '—'}</td>
+                    <td style="font-size: 12px; color: var(--text-secondary);">${c.purpose || '—'}</td>
+                    <td style="text-align: right; color: var(--danger);">${formatMoney(c.amount)}</td>
+                    <td><span onclick="deleteCreditPayment(${idx})" style="cursor: pointer; opacity: 0.6;" title="Удалить">🗑️</span></td>
+                </tr>`;
+            });
+
+            html += '</tbody></table></div>';
+            container.innerHTML = html;
+        }
+
+        function deleteCreditPayment(index) {
+            if (!confirm('Удалить этот кредитный платёж?')) return;
+            appState.calendarData.splice(index, 1);
+            localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
+            renderCreditsList();
+            if (typeof recalcDerivedData === 'function') recalcDerivedData();
+            if (typeof updateDashboard === 'function') updateDashboard();
         }
         
         // === СПРАВОЧНИК КОНТРАГЕНТОВ ===
@@ -3175,7 +3348,8 @@
                 if (article.section) {
                     currentSection = article.name;
                     sections[currentSection] = [];
-                } else if (currentSection && article.key && !excludedKeys.includes(article.key)) {
+                } else if (currentSection && article.key && !excludedKeys.includes(article.key) && !article.virtual) {
+                    // Виртуальные статьи (Маркетинг/Прочее) в селекте не показываем — выбирают конкретные подключи
                     sections[currentSection].push(article);
                 }
             });
@@ -3331,7 +3505,7 @@
             let curSec = '';
             appState.articles.forEach(a => {
                 if (a.section) { curSec = a.name; articleSections[curSec] = []; }
-                else if (curSec && a.key && !excludedKeys.includes(a.key)) { articleSections[curSec].push(a); }
+                else if (curSec && a.key && !excludedKeys.includes(a.key) && !a.virtual) { articleSections[curSec].push(a); }
             });
             let articleOptionsHtml = '';
             Object.keys(articleSections).forEach(sec => {
@@ -3744,6 +3918,7 @@
                 a.key && 
                 !a.section && 
                 !a.subsection &&
+                !a.virtual &&
                 !excludedKeys.includes(a.key)
             );
             
@@ -3956,6 +4131,7 @@
                 a.key && 
                 !a.section && 
                 !a.subsection &&
+                !a.virtual &&
                 !excludedKeys.includes(a.key)
             );
             const articlesList = articles.map((a, i) => `${i + 1}. ${a.name}`).join('\n');
@@ -6362,26 +6538,39 @@
             const searchText = searchEl ? searchEl.value.toLowerCase() : '';
             const sortEl = document.getElementById('unitSort');
             const sortBy = sortEl ? sortEl.value : 'name';
+            const byMonthEl = document.getElementById('unitByMonth');
+            const byMonth = byMonthEl ? byMonthEl.checked : false;
 
-            // Рассчитываем данные по проектам из calendarData за выбранный период
+            const monthsShort = ['Янв','Фев','Мар','Апр','Май','Июн','Июл','Авг','Сен','Окт','Ноя','Дек'];
+
+            // Определяем какие месяцы показывать
+            // Если выбран конкретный месяц — только он
+            // Иначе — все 12, если режим "По месяцам", иначе суммируем за весь год в одну колонку
+            const monthsToShow = month ? [month] : ['01','02','03','04','05','06','07','08','09','10','11','12'];
+
+            // Структура: project → {byMonth: {'01': {revenue, costs}, '02': ..., ...}, employees, totalRevenue, totalCosts}
             const cps = getCounterparties();
-            const projectMap = {}; // {name: {revenue, costs, employees}}
+            const projectMap = {};
 
-            // Собираем проекты из projectsData как базу
             (appState.projectsData || []).forEach(p => {
-                projectMap[p.name] = { revenue: 0, costs: 0, employees: p.employees || 0 };
+                projectMap[p.name] = {
+                    byMonth: {},
+                    employees: p.employees || 0,
+                    totalRevenue: 0,
+                    totalCosts: 0
+                };
+                monthsToShow.forEach(m => projectMap[p.name].byMonth[m] = { revenue: 0, costs: 0 });
             });
 
-            // Считаем выручку и расходы из calendarData
-            // ВАЖНО: банковские операции (source='bank') в юнит-экономику не идут — они только в платежном календаре
+            // Считаем по операциям, банк исключаем
             appState.calendarData.forEach(t => {
                 if (t.source === 'bank') return;
+                if (!t.date) return;
                 const tYear = t.date.substring(0, 4);
                 const tMonth = t.date.substring(5, 7);
                 if (tYear !== year) return;
-                if (month && tMonth !== month) return;
+                if (!monthsToShow.includes(tMonth)) return;
 
-                // Определяем проект
                 let projName = t.project || null;
                 if (!projName) {
                     const cp = findCounterpartyMatch(t.counterparty);
@@ -6389,29 +6578,139 @@
                 }
                 if (!projName) return;
 
-                if (!projectMap[projName]) projectMap[projName] = { revenue: 0, costs: 0, employees: 0 };
+                if (!projectMap[projName]) {
+                    projectMap[projName] = { byMonth: {}, employees: 0, totalRevenue: 0, totalCosts: 0 };
+                    monthsToShow.forEach(m => projectMap[projName].byMonth[m] = { revenue: 0, costs: 0 });
+                }
+                if (!projectMap[projName].byMonth[tMonth]) {
+                    projectMap[projName].byMonth[tMonth] = { revenue: 0, costs: 0 };
+                }
 
+                const amt = t.amount || 0;
                 if (t.type === 'income') {
-                    projectMap[projName].revenue += t.amount || 0;
+                    projectMap[projName].byMonth[tMonth].revenue += amt;
+                    projectMap[projName].totalRevenue += amt;
                 } else {
-                    projectMap[projName].costs += t.amount || 0;
+                    projectMap[projName].byMonth[tMonth].costs += amt;
+                    projectMap[projName].totalCosts += amt;
                 }
             });
 
-            // Конвертируем в массив
+            // В массив
             let projects = Object.entries(projectMap).map(([name, data]) => ({
-                name, revenue: data.revenue, costs: data.costs, employees: data.employees
+                name,
+                byMonth: data.byMonth,
+                employees: data.employees,
+                revenue: data.totalRevenue,
+                costs: data.totalCosts
             }));
 
-            // Фильтр по поиску
-            if (searchText) {
-                projects = projects.filter(p => p.name.toLowerCase().includes(searchText));
-            }
+            // Фильтр
+            if (searchText) projects = projects.filter(p => p.name.toLowerCase().includes(searchText));
 
             // Сортировка
             if (sortBy === 'name') projects.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
             else if (sortBy === 'revenue') projects.sort((a, b) => b.revenue - a.revenue);
             else if (sortBy === 'margin') projects.sort((a, b) => (b.revenue - b.costs) - (a.revenue - a.costs));
+
+            // ===== Режим 1: ПО МЕСЯЦАМ (помесячная разбивка) =====
+            if (byMonth) {
+                // Шапка: Объект | <месяц Выручка/Себестоимость/Маржа> ... | Итого выручка | Итого себестоимость | Итого маржа | Маржа % | Сотрудников | Ср. маржа/чел
+                let theadHtml = '<tr><th rowspan="2" style="vertical-align:middle;">Объект</th>';
+                monthsToShow.forEach(m => {
+                    theadHtml += `<th colspan="3" style="text-align:center; border-left:1px solid var(--border);">${monthsShort[parseInt(m)-1]}</th>`;
+                });
+                theadHtml += '<th colspan="3" style="text-align:center; border-left:2px solid var(--text-primary); background:var(--bg-secondary);">ИТОГО за период</th>';
+                theadHtml += '<th rowspan="2" style="vertical-align:middle; text-align:right;">Маржа, %</th>';
+                theadHtml += '<th rowspan="2" style="vertical-align:middle; text-align:right;">Сотр.</th>';
+                theadHtml += '<th rowspan="2" style="vertical-align:middle; text-align:right;">Ср.маржа/чел</th></tr>';
+                theadHtml += '<tr>';
+                monthsToShow.forEach(m => {
+                    theadHtml += '<th style="text-align:right; border-left:1px solid var(--border); font-size:11px;">Выр</th>';
+                    theadHtml += '<th style="text-align:right; font-size:11px;">Себ</th>';
+                    theadHtml += '<th style="text-align:right; font-size:11px; color:var(--success);">Маржа</th>';
+                });
+                theadHtml += '<th style="text-align:right; border-left:2px solid var(--text-primary); background:var(--bg-secondary); font-size:12px;">Выручка</th>';
+                theadHtml += '<th style="text-align:right; background:var(--bg-secondary); font-size:12px;">Себест.</th>';
+                theadHtml += '<th style="text-align:right; background:var(--bg-secondary); font-size:12px;">Маржа</th>';
+                theadHtml += '</tr>';
+                document.getElementById('unitTableHead').innerHTML = theadHtml;
+
+                if (projects.length === 0) {
+                    document.getElementById('unitTableBody').innerHTML = `<tr><td colspan="${monthsToShow.length*3 + 5}" style="text-align:center; padding:40px; color:var(--text-secondary);">Нет данных за выбранный период</td></tr>`;
+                    return;
+                }
+
+                let html = '';
+                const total = { byMonth: {}, employees: 0, revenue: 0, costs: 0 };
+                monthsToShow.forEach(m => total.byMonth[m] = { revenue: 0, costs: 0 });
+
+                projects.forEach(p => {
+                    const margin = p.revenue - p.costs;
+                    const marginPct = p.revenue > 0 ? (margin / p.revenue * 100) : 0;
+                    const avgMargin = p.employees > 0 ? (margin / p.employees) : 0;
+                    const safeName = p.name.replace(/'/g, "\\'");
+
+                    html += `<tr style="cursor:pointer;" onclick="openProjectCard('${safeName}')">`;
+                    html += `<td><strong>${p.name}</strong></td>`;
+                    monthsToShow.forEach(m => {
+                        const mb = p.byMonth[m] || { revenue: 0, costs: 0 };
+                        const mMargin = mb.revenue - mb.costs;
+                        total.byMonth[m].revenue += mb.revenue;
+                        total.byMonth[m].costs += mb.costs;
+                        html += `<td style="text-align:right; border-left:1px solid var(--border); font-size:12px;">${mb.revenue ? formatMoney(mb.revenue) : '—'}</td>`;
+                        html += `<td style="text-align:right; font-size:12px; color:${mb.costs?'var(--danger)':'inherit'};">${mb.costs ? formatMoney(mb.costs) : '—'}</td>`;
+                        html += `<td style="text-align:right; font-size:12px; font-weight:600; color:${mMargin>=0?'var(--success)':'var(--danger)'};">${(mb.revenue||mb.costs) ? formatMoney(mMargin) : '—'}</td>`;
+                    });
+                    total.revenue += p.revenue;
+                    total.costs += p.costs;
+                    total.employees += p.employees;
+                    html += `<td style="text-align:right; border-left:2px solid var(--text-primary); background:var(--bg-secondary); font-weight:600;">${formatMoney(p.revenue)}</td>`;
+                    html += `<td style="text-align:right; background:var(--bg-secondary); color:var(--danger); font-weight:600;">${formatMoney(p.costs)}</td>`;
+                    html += `<td style="text-align:right; background:var(--bg-secondary); font-weight:700; color:${margin>=0?'var(--success)':'var(--danger)'};">${formatMoney(margin)}</td>`;
+                    html += `<td style="text-align:right; color:${marginPct>=0?'var(--success)':'var(--danger)'};">${formatPercent(marginPct)}</td>`;
+                    html += `<td style="text-align:right;">${p.employees}</td>`;
+                    html += `<td style="text-align:right; color:${avgMargin>=0?'var(--success)':'var(--danger)'};">${formatMoney(avgMargin)}</td>`;
+                    html += `</tr>`;
+                });
+
+                // Итоговая строка
+                const tMargin = total.revenue - total.costs;
+                const tPct = total.revenue > 0 ? (tMargin / total.revenue * 100) : 0;
+                const tAvg = total.employees > 0 ? (tMargin / total.employees) : 0;
+                html += `<tr style="border-top:3px solid var(--text-primary); background:#f0f0f5; font-weight:700;">`;
+                html += `<td>ИТОГО (${projects.length})</td>`;
+                monthsToShow.forEach(m => {
+                    const mb = total.byMonth[m];
+                    const mM = mb.revenue - mb.costs;
+                    html += `<td style="text-align:right; border-left:1px solid var(--border); font-size:12px;">${formatMoney(mb.revenue)}</td>`;
+                    html += `<td style="text-align:right; font-size:12px; color:var(--danger);">${formatMoney(mb.costs)}</td>`;
+                    html += `<td style="text-align:right; font-size:12px; color:${mM>=0?'var(--success)':'var(--danger)'};">${formatMoney(mM)}</td>`;
+                });
+                html += `<td style="text-align:right; border-left:2px solid var(--text-primary); background:#e8e8ee;">${formatMoney(total.revenue)}</td>`;
+                html += `<td style="text-align:right; background:#e8e8ee; color:var(--danger);">${formatMoney(total.costs)}</td>`;
+                html += `<td style="text-align:right; background:#e8e8ee; color:${tMargin>=0?'var(--success)':'var(--danger)'};">${formatMoney(tMargin)}</td>`;
+                html += `<td style="text-align:right;">${formatPercent(tPct)}</td>`;
+                html += `<td style="text-align:right;">${total.employees}</td>`;
+                html += `<td style="text-align:right; color:${tAvg>=0?'var(--success)':'var(--danger)'};">${formatMoney(tAvg)}</td>`;
+                html += `</tr>`;
+
+                document.getElementById('unitTableBody').innerHTML = html;
+                return;
+            }
+
+            // ===== Режим 2: ОБЩИЙ (одна строка на проект, без помесячной разбивки) =====
+            // Восстанавливаем стандартную шапку
+            document.getElementById('unitTableHead').innerHTML = `
+                <tr>
+                    <th>Объект</th>
+                    <th style="text-align: right;">Выручка</th>
+                    <th style="text-align: right;">Себестоимость</th>
+                    <th style="text-align: right;">Маржа</th>
+                    <th style="text-align: right;">Маржа, %</th>
+                    <th style="text-align: right;">Сотрудников</th>
+                    <th style="text-align: right;">Ср. маржа / чел.</th>
+                </tr>`;
 
             if (projects.length === 0) {
                 document.getElementById('unitTableBody').innerHTML = '<tr><td colspan="7" style="text-align:center; padding:40px; color:var(--text-secondary);">Нет данных за выбранный период</td></tr>';
@@ -7156,11 +7455,27 @@
             const artDef = appState.articles.find(a => a.key === articleKey);
             const artName = artDef ? artDef.name : articleKey;
 
-            // Ищем операции из calendarData с этим articleKey за этот месяц
-            // ВАЖНО: банковские операции в ОПУ-детализацию не идут — они только в платежном календаре
+            // Виртуальные статьи (Маркетинг, Прочее) — расширяем до набора реальных ключей
+            // Комиссия банка — исключение: тянется ТОЛЬКО из банковских операций
+            const isBankCommission = articleKey === 'bank_commission';
+            let keysToMatch;
+            if (artDef && artDef.virtual && Array.isArray(artDef.virtualKeys)) {
+                keysToMatch = artDef.virtualKeys;
+            } else {
+                keysToMatch = [articleKey];
+            }
+
+            // Ищем операции из calendarData
+            // - Для обычных статей: source != 'bank'
+            // - Для "Комиссия банка": ТОЛЬКО source == 'bank'
             const ops = appState.calendarData.filter(t => {
-                if (t.source === 'bank') return false;
-                return t.date.startsWith(monthKey) && t.articleKey === articleKey;
+                if (!t.date.startsWith(monthKey)) return false;
+                if (!keysToMatch.includes(t.articleKey)) return false;
+                if (isBankCommission) {
+                    return t.source === 'bank';
+                } else {
+                    return t.source !== 'bank';
+                }
             });
 
             // Также ищем в revenueData (зарплатные данные fot/ndfl/pfr/fss)
@@ -7169,6 +7484,11 @@
             const revVal = appState.revenueData?.[monthKey]?.[articleKey] || 0;
 
             const fmt = v => v.toLocaleString('ru-RU', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+            // Для зарплатных статей (ФОТ, НДФЛ, ПФР, ФСС) — округляем до целых, без копеек
+            const intKeys = new Set(['ndfl','office_ndfl','pfr','fss','office_pfr','office_fss','fot','office_fot']);
+            const fmtMain = intKeys.has(articleKey)
+                ? (v => Math.round(v).toLocaleString('ru-RU'))
+                : fmt;
             const monthNames = ['', 'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 
             let html = `<p style="margin-bottom:12px;"><strong>${artName}</strong> — ${monthNames[parseInt(monthNum)]} ${year}</p>`;
@@ -7187,15 +7507,15 @@
                     let artDrop = `<select onchange="opuChangeArticle(${realIdx}, this.value)" style="width:100%; padding:3px; font-size:11px;">`;
                     availArts.forEach(a => { artDrop += `<option value="${a.key}" ${a.key === t.articleKey ? 'selected' : ''}>${a.name}</option>`; });
                     artDrop += '</select>';
-                    html += `<tr><td style="white-space:nowrap;">${new Date(t.date).toLocaleDateString('ru-RU')}</td><td style="font-size:12px;">${t.counterparty||'—'}</td><td style="font-size:11px; max-width:200px; white-space:normal;">${(t.purpose||'').substring(0,60)}</td><td style="text-align:right;">${fmt(t.amount)} ₽</td><td>${artDrop}</td><td style="font-size:11px;">${src}</td></tr>`;
+                    html += `<tr><td style="white-space:nowrap;">${new Date(t.date).toLocaleDateString('ru-RU')}</td><td style="font-size:12px;">${t.counterparty||'—'}</td><td style="font-size:11px; max-width:200px; white-space:normal;">${(t.purpose||'').substring(0,60)}</td><td style="text-align:right;">${fmtMain(t.amount)} ₽</td><td>${artDrop}</td><td style="font-size:11px;">${src}</td></tr>`;
                 });
-                html += `<tr style="font-weight:600; background:var(--bg-secondary);"><td colspan="3">Итого</td><td style="text-align:right;">${fmt(total)} ₽</td><td colspan="2"></td></tr>`;
+                html += `<tr style="font-weight:600; background:var(--bg-secondary);"><td colspan="3">Итого</td><td style="text-align:right;">${fmtMain(total)} ₽</td><td colspan="2"></td></tr>`;
                 html += '</tbody></table></div>';
             }
 
             if (isSalaryKey && revVal > 0) {
                 const labels = {fot:'ФОТ (к выплате)', ndfl:'НДФЛ', pfr:'ПФР', fss:'ФСС'};
-                html += `<div style="margin-top:12px; padding:12px; background:#e8f5e9; border-radius:8px;"><strong>Из зарплатных ведомостей:</strong> ${labels[articleKey] || articleKey} = ${fmt(revVal)} ₽</div>`;
+                html += `<div style="margin-top:12px; padding:12px; background:#e8f5e9; border-radius:8px;"><strong>Из зарплатных ведомостей:</strong> ${labels[articleKey] || articleKey} = ${fmtMain(revVal)} ₽</div>`;
             }
 
             if (ops.length === 0 && revVal === 0) {
@@ -7252,6 +7572,9 @@
             const project = (appState.projectsData || []).find(p => p.name === projectName);
             if (!project) return;
 
+            const yearEl = document.getElementById('unitYear');
+            const year = yearEl ? yearEl.value : '2026';
+
             // Все операции связанные с этим проектом (через контрагентов)
             const counterparties = getCounterparties();
             const projectCps = counterparties.filter(cp => cp.project === projectName);
@@ -7265,8 +7588,8 @@
             const ops = appState.calendarData.filter(t => {
                 // Банковские операции в юнит-экономику не показываем — они только в платежном календаре
                 if (t.source === 'bank') return false;
+                if (!t.date || !t.date.startsWith(year)) return false;
                 // Если у операции явно задан проект — учитываем только совпадение с текущим.
-                // Это важно после перемещения между проектами: нельзя показывать операцию в обоих.
                 if (t.project) {
                     return t.project.toLowerCase() === projectName.toLowerCase();
                 }
@@ -7281,46 +7604,77 @@
             const fmt = v => v.toLocaleString('ru-RU', {minimumFractionDigits: 2, maximumFractionDigits: 2});
             const totalInc = ops.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
             const totalExp = ops.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
-            const margin = project.revenue - project.costs;
-            const marginPct = project.revenue > 0 ? (margin / project.revenue * 100) : 0;
+            const margin = totalInc - totalExp;
+            const marginPct = totalInc > 0 ? (margin / totalInc * 100) : 0;
             const allProjects = (appState.projectsData || []).map(p => p.name);
+
+            // Разбивка по месяцам
+            const monthsShort = ['Янв','Фев','Мар','Апр','Май','Июн','Июл','Авг','Сен','Окт','Ноя','Дек'];
+            const byMonth = {};
+            for (let m = 1; m <= 12; m++) {
+                const key = String(m).padStart(2,'0');
+                byMonth[key] = { revenue: 0, costs: 0 };
+            }
+            ops.forEach(t => {
+                const m = t.date.substring(5,7);
+                if (!byMonth[m]) return;
+                if (t.type === 'income') byMonth[m].revenue += t.amount || 0;
+                else byMonth[m].costs += t.amount || 0;
+            });
 
             let html = `
                 <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:12px; margin-bottom:20px;">
-                    <div style="padding:12px; background:#e3f2fd; border-radius:8px; text-align:center;"><div style="font-size:12px; color:var(--text-secondary);">Выручка</div><div style="font-size:20px; font-weight:700; color:var(--success);">${formatMoney(project.revenue)}</div></div>
-                    <div style="padding:12px; background:#fce4ec; border-radius:8px; text-align:center;"><div style="font-size:12px; color:var(--text-secondary);">Себестоимость</div><div style="font-size:20px; font-weight:700; color:var(--danger);">${formatMoney(project.costs)}</div></div>
+                    <div style="padding:12px; background:#e3f2fd; border-radius:8px; text-align:center;"><div style="font-size:12px; color:var(--text-secondary);">Выручка (${year})</div><div style="font-size:20px; font-weight:700; color:var(--success);">${formatMoney(totalInc)}</div></div>
+                    <div style="padding:12px; background:#fce4ec; border-radius:8px; text-align:center;"><div style="font-size:12px; color:var(--text-secondary);">Себестоимость</div><div style="font-size:20px; font-weight:700; color:var(--danger);">${formatMoney(totalExp)}</div></div>
                     <div style="padding:12px; background:${margin>=0?'#e8f5e9':'#ffebee'}; border-radius:8px; text-align:center;"><div style="font-size:12px; color:var(--text-secondary);">Маржа</div><div style="font-size:20px; font-weight:700;">${formatMoney(margin)} (${formatPercent(marginPct)})</div></div>
-                    <div style="padding:12px; background:#f3e5f5; border-radius:8px; text-align:center;"><div style="font-size:12px; color:var(--text-secondary);">Сотрудников</div><div style="font-size:20px; font-weight:700;">${project.employees}</div></div>
+                    <div style="padding:12px; background:#f3e5f5; border-radius:8px; text-align:center;"><div style="font-size:12px; color:var(--text-secondary);">Сотрудников</div><div style="font-size:20px; font-weight:700;">${project.employees||0}</div></div>
                 </div>
                 <div style="margin-bottom:12px; display:flex; gap:8px; flex-wrap:wrap;">
                     <button class="btn btn-small" onclick="editProjectName('${projectName.replace(/'/g,"\\'")}')">Переименовать проект</button>
                     <button class="btn btn-small btn-secondary" onclick="deleteProject('${projectName.replace(/'/g,"\\'")}')">Удалить проект</button>
                 </div>
-                <div style="margin-bottom:12px; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
-                    <div onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? 'block' : 'none'; this.querySelector('span').textContent = this.nextElementSibling.style.display === 'none' ? '►' : '▼';"
-                         style="padding:10px 12px; background:var(--bg-secondary); cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
-                        <strong><span>▼</span> Контрагенты проекта (${projectCps.length})</strong>
-                        <button class="btn btn-small" onclick="event.stopPropagation(); addCpToProject('${projectName.replace(/'/g,"\\'")}')" style="font-size:11px;">+ Привязать контрагента</button>
-                    </div>
-                    <div style="padding:12px;">
-                        ${projectCps.length > 0 ? projectCps.map(cp => {
-                            const variants = (cp.variants || []).join(', ');
-                            return `<div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid #f0f0f0;">
-                                <div><strong style="font-size:13px;">${cp.name}</strong>${variants ? `<br><span style="font-size:11px; color:var(--text-secondary);">Варианты: ${variants}</span>` : ''}</div>
-                                <div style="display:flex; gap:4px;">
-                                    <button onclick="addVariantToCp('${cp.id}', '${projectName.replace(/'/g,"\\'")}')" style="padding:2px 6px; font-size:11px; border:1px solid var(--border); border-radius:4px; background:#fff; cursor:pointer;" title="Добавить вариант">+ вариант</button>
-                                    <button onclick="unlinkCpFromProject('${cp.id}', '${projectName.replace(/'/g,"\\'")}')" style="padding:2px 6px; font-size:11px; border:1px solid #dc3545; border-radius:4px; background:#fff; color:#dc3545; cursor:pointer;" title="Отвязать">×</button>
-                                </div>
-                            </div>`;
-                        }).join('') : '<p style="color:var(--text-secondary); font-size:13px;">Нет привязанных контрагентов</p>'}
-                    </div>
-                </div>
-                <h4 style="margin-bottom:8px;">Операции (${ops.length})</h4>
-            `;
+
+                <h4 style="margin-bottom:8px;">Разбивка по месяцам (${year})</h4>
+                <div class="table-scroll" style="margin-bottom:20px;">
+                    <table style="font-size:13px;">
+                        <thead><tr>
+                            <th>Месяц</th>
+                            <th style="text-align:right;">Выручка</th>
+                            <th style="text-align:right;">Себестоимость</th>
+                            <th style="text-align:right;">Маржа</th>
+                            <th style="text-align:right;">Маржа, %</th>
+                        </tr></thead>
+                        <tbody>`;
+
+            for (let m = 1; m <= 12; m++) {
+                const key = String(m).padStart(2,'0');
+                const mb = byMonth[key];
+                if (mb.revenue === 0 && mb.costs === 0) continue;
+                const mMargin = mb.revenue - mb.costs;
+                const mPct = mb.revenue > 0 ? (mMargin / mb.revenue * 100) : 0;
+                html += `<tr>
+                    <td><strong>${monthsShort[m-1]}</strong></td>
+                    <td style="text-align:right; color:var(--success);">${mb.revenue ? formatMoney(mb.revenue) : '—'}</td>
+                    <td style="text-align:right; color:var(--danger);">${mb.costs ? formatMoney(mb.costs) : '—'}</td>
+                    <td style="text-align:right; font-weight:600; color:${mMargin>=0?'var(--success)':'var(--danger)'};">${formatMoney(mMargin)}</td>
+                    <td style="text-align:right; color:${mPct>=0?'var(--success)':'var(--danger)'};">${formatPercent(mPct)}</td>
+                </tr>`;
+            }
+
+            html += `<tr style="border-top:2px solid var(--text-primary); background:var(--bg-secondary); font-weight:700;">
+                <td>ИТОГО за ${year}</td>
+                <td style="text-align:right;">${formatMoney(totalInc)}</td>
+                <td style="text-align:right; color:var(--danger);">${formatMoney(totalExp)}</td>
+                <td style="text-align:right; color:${margin>=0?'var(--success)':'var(--danger)'};">${formatMoney(margin)}</td>
+                <td style="text-align:right;">${formatPercent(marginPct)}</td>
+            </tr>`;
+            html += `</tbody></table></div>`;
+
+            html += `<h4 style="margin-bottom:8px;">Операции (${ops.length})</h4>`;
 
             if (ops.length > 0) {
                 const sourceLabels = {bank:'Банк',sales:'Продажи',salary:'Зарплата',purchases:'Покупки'};
-                html += '<div class="table-scroll" style="max-height:350px;"><table><thead><tr><th>Дата</th><th>Контрагент</th><th style="text-align:right;">Приход</th><th style="text-align:right;">Расход</th><th>Статья</th><th>Источник</th><th style="min-width:120px;">Переместить</th><th></th></tr></thead><tbody>';
+                html += '<div class="table-scroll" style="max-height:350px;"><table><thead><tr><th>Дата</th><th style="text-align:right;">Приход</th><th style="text-align:right;">Расход</th><th>Статья</th><th>Источник</th><th style="min-width:120px;">Переместить</th><th></th></tr></thead><tbody>';
                 ops.forEach(t => {
                     const idx = appState.calendarData.indexOf(t);
                     const isInc = t.type === 'income';
@@ -7331,7 +7685,6 @@
                     moveSelect += '</select>';
                     html += `<tr>
                         <td style="white-space:nowrap;">${new Date(t.date).toLocaleDateString('ru-RU')}</td>
-                        <td style="font-size:12px;">${t.counterparty||'—'}</td>
                         <td style="text-align:right; color:var(--success);">${isInc ? fmt(t.amount)+' ₽' : '—'}</td>
                         <td style="text-align:right; color:var(--danger);">${!isInc ? fmt(t.amount)+' ₽' : '—'}</td>
                         <td style="font-size:11px;">${artName}</td>
@@ -7342,7 +7695,7 @@
                 });
                 html += '</tbody></table></div>';
             } else {
-                html += '<p style="color:var(--text-secondary);">Нет операций для этого проекта</p>';
+                html += '<p style="color:var(--text-secondary);">Нет операций за этот период</p>';
             }
 
             document.getElementById('projectCardTitle').textContent = `Проект: ${projectName}`;
@@ -7502,7 +7855,7 @@
             let artFlatList = [];
             appState.articles.forEach(a => {
                 if (a.section) { curSection = a.name; return; }
-                if (a.key && !a.subsection && !excludedKeys.includes(a.key)) {
+                if (a.key && !a.subsection && !a.virtual && !excludedKeys.includes(a.key)) {
                     artFlatList.push(a);
                     artList += `${artFlatList.length}. [${curSection}] ${a.name}\n`;
                 }
