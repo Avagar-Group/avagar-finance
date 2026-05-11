@@ -1437,31 +1437,75 @@
 
     <!-- Модалка добавления кредитного платежа -->
     <div class="modal" id="creditModal">
-        <div class="modal-content" style="max-width: 500px;">
+        <div class="modal-content" style="max-width: 600px;">
             <div class="modal-header">
                 <span>Добавить кредитный платёж</span>
                 <button class="modal-close" onclick="document.getElementById('creditModal').classList.remove('active')">×</button>
             </div>
             <div style="padding: 20px;">
-                <div style="margin-bottom: 12px;">
-                    <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Дата платежа</label>
-                    <input type="date" id="creditDate" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                <!-- Переключатель режима -->
+                <div style="display:flex; gap:8px; margin-bottom:20px; background:#f0f0f5; padding:4px; border-radius:8px;">
+                    <button id="creditModeSingleBtn" onclick="switchCreditMode('single')" style="flex:1; padding:8px; border:none; border-radius:6px; background:#fff; cursor:pointer; font-weight:600;">Один платёж</button>
+                    <button id="creditModeScheduleBtn" onclick="switchCreditMode('schedule')" style="flex:1; padding:8px; border:none; border-radius:6px; background:transparent; cursor:pointer;">График платежей</button>
                 </div>
-                <div style="margin-bottom: 12px;">
-                    <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Сумма платежа, ₽</label>
-                    <input type="number" id="creditAmount" placeholder="0" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+
+                <!-- Режим: Один платёж -->
+                <div id="creditModeSingle">
+                    <div style="margin-bottom: 12px;">
+                        <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Дата платежа</label>
+                        <input type="date" id="creditDate" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Сумма платежа, ₽</label>
+                        <input type="number" id="creditAmount" placeholder="0" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Банк / контрагент</label>
+                        <input type="text" id="creditCounterparty" placeholder="Например: Сбербанк, ВТБ" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Назначение (необязательно)</label>
+                        <input type="text" id="creditPurpose" placeholder="Например: Погашение кредита №12345" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                    </div>
+                    <div style="display:flex; gap:8px; justify-content:flex-end;">
+                        <button class="btn btn-secondary" onclick="document.getElementById('creditModal').classList.remove('active')">Отмена</button>
+                        <button class="btn" onclick="saveCreditPayment()">Сохранить</button>
+                    </div>
                 </div>
-                <div style="margin-bottom: 12px;">
-                    <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Банк / контрагент</label>
-                    <input type="text" id="creditCounterparty" placeholder="Например: Сбербанк, ВТБ" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
-                </div>
-                <div style="margin-bottom: 20px;">
-                    <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Назначение (необязательно)</label>
-                    <input type="text" id="creditPurpose" placeholder="Например: Погашение кредита №12345" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
-                </div>
-                <div style="display:flex; gap:8px; justify-content:flex-end;">
-                    <button class="btn btn-secondary" onclick="document.getElementById('creditModal').classList.remove('active')">Отмена</button>
-                    <button class="btn" onclick="saveCreditPayment()">Сохранить</button>
+
+                <!-- Режим: График платежей -->
+                <div id="creditModeSchedule" style="display:none;">
+                    <div style="padding:10px; background:#fff3cd; border-radius:6px; margin-bottom:16px; font-size:13px; color:#856404;">
+                        💡 Создаст N одинаковых платежей с шагом в месяц. Можно потом отредактировать или удалить любой платёж в списке.
+                    </div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                        <div>
+                            <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Дата первого платежа</label>
+                            <input type="date" id="scheduleStartDate" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                        </div>
+                        <div>
+                            <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Количество месяцев</label>
+                            <input type="number" id="scheduleMonths" placeholder="12" min="1" max="120" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                        </div>
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Сумма платежа, ₽ (за один месяц)</label>
+                        <input type="number" id="scheduleAmount" placeholder="0" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Банк / контрагент</label>
+                        <input type="text" id="scheduleCounterparty" placeholder="Например: Сбербанк, ВТБ" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display:block; margin-bottom:4px; font-size:13px; color:var(--text-secondary);">Назначение (необязательно)</label>
+                        <input type="text" id="schedulePurpose" placeholder="Например: Погашение кредита №12345" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:4px;">
+                    </div>
+                    <div id="schedulePreview" style="margin-bottom:16px;"></div>
+                    <div style="display:flex; gap:8px; justify-content:flex-end;">
+                        <button class="btn btn-secondary" onclick="document.getElementById('creditModal').classList.remove('active')">Отмена</button>
+                        <button class="btn btn-secondary" onclick="previewSchedule()">Предпросмотр</button>
+                        <button class="btn" onclick="saveCreditSchedule()">Создать график</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2948,7 +2992,127 @@
             document.getElementById('creditAmount').value = '';
             document.getElementById('creditCounterparty').value = '';
             document.getElementById('creditPurpose').value = '';
+
+            // Очистка формы графика
+            document.getElementById('scheduleStartDate').value = today;
+            document.getElementById('scheduleMonths').value = '';
+            document.getElementById('scheduleAmount').value = '';
+            document.getElementById('scheduleCounterparty').value = '';
+            document.getElementById('schedulePurpose').value = '';
+            document.getElementById('schedulePreview').innerHTML = '';
+
+            // По умолчанию режим "Один платёж"
+            switchCreditMode('single');
+
             document.getElementById('creditModal').classList.add('active');
+        }
+
+        function switchCreditMode(mode) {
+            const single = document.getElementById('creditModeSingle');
+            const schedule = document.getElementById('creditModeSchedule');
+            const singleBtn = document.getElementById('creditModeSingleBtn');
+            const scheduleBtn = document.getElementById('creditModeScheduleBtn');
+
+            if (mode === 'single') {
+                single.style.display = '';
+                schedule.style.display = 'none';
+                singleBtn.style.background = '#fff';
+                singleBtn.style.fontWeight = '600';
+                scheduleBtn.style.background = 'transparent';
+                scheduleBtn.style.fontWeight = '400';
+            } else {
+                single.style.display = 'none';
+                schedule.style.display = '';
+                singleBtn.style.background = 'transparent';
+                singleBtn.style.fontWeight = '400';
+                scheduleBtn.style.background = '#fff';
+                scheduleBtn.style.fontWeight = '600';
+            }
+        }
+
+        // Возвращает массив дат для графика: 1-й платёж — startDate, далее каждый следующий месяц того же числа
+        function generateScheduleDates(startDate, monthsCount) {
+            const dates = [];
+            const d0 = new Date(startDate);
+            for (let i = 0; i < monthsCount; i++) {
+                const d = new Date(d0.getFullYear(), d0.getMonth() + i, d0.getDate());
+                const y = d.getFullYear();
+                const m = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                dates.push(`${y}-${m}-${day}`);
+            }
+            return dates;
+        }
+
+        function previewSchedule() {
+            const startDate = document.getElementById('scheduleStartDate').value;
+            const monthsCount = parseInt(document.getElementById('scheduleMonths').value) || 0;
+            const amount = parseFloat(document.getElementById('scheduleAmount').value) || 0;
+            const counterparty = document.getElementById('scheduleCounterparty').value.trim();
+            const preview = document.getElementById('schedulePreview');
+
+            if (!startDate || monthsCount <= 0 || amount <= 0 || !counterparty) {
+                preview.innerHTML = '<p style="color:var(--text-secondary); padding:10px; text-align:center;">Заполните все поля для предпросмотра</p>';
+                return;
+            }
+            if (monthsCount > 120) {
+                preview.innerHTML = '<p style="color:var(--danger); padding:10px;">Максимум 120 месяцев (10 лет)</p>';
+                return;
+            }
+
+            const dates = generateScheduleDates(startDate, monthsCount);
+            const totalSum = amount * monthsCount;
+
+            let html = `<div style="background:#e8f5e9; padding:10px; border-radius:6px; margin-bottom:8px; font-size:13px;">
+                <strong>Будет создано платежей:</strong> ${monthsCount}<br>
+                <strong>Сумма каждого:</strong> ${formatMoney(amount)}<br>
+                <strong>ИТОГО за период:</strong> ${formatMoney(totalSum)}<br>
+                <strong>Период:</strong> ${new Date(dates[0]).toLocaleDateString('ru-RU')} — ${new Date(dates[dates.length-1]).toLocaleDateString('ru-RU')}
+            </div>`;
+            html += '<div style="max-height:200px; overflow-y:auto; border:1px solid var(--border); border-radius:6px;"><table style="font-size:12px;"><thead><tr><th>№</th><th>Дата</th><th style="text-align:right;">Сумма</th></tr></thead><tbody>';
+            dates.forEach((d, i) => {
+                html += `<tr><td>${i+1}</td><td>${new Date(d).toLocaleDateString('ru-RU')}</td><td style="text-align:right;">${formatMoney(amount)}</td></tr>`;
+            });
+            html += '</tbody></table></div>';
+            preview.innerHTML = html;
+        }
+
+        function saveCreditSchedule() {
+            const startDate = document.getElementById('scheduleStartDate').value;
+            const monthsCount = parseInt(document.getElementById('scheduleMonths').value) || 0;
+            const amount = parseFloat(document.getElementById('scheduleAmount').value) || 0;
+            const counterparty = document.getElementById('scheduleCounterparty').value.trim();
+            const purpose = document.getElementById('schedulePurpose').value.trim();
+
+            if (!startDate) { alert('Укажите дату первого платежа'); return; }
+            if (monthsCount <= 0 || monthsCount > 120) { alert('Количество месяцев: от 1 до 120'); return; }
+            if (amount <= 0) { alert('Сумма должна быть больше 0'); return; }
+            if (!counterparty) { alert('Укажите банк или контрагента'); return; }
+
+            const dates = generateScheduleDates(startDate, monthsCount);
+            if (!confirm(`Создать ${monthsCount} платежей по ${formatMoney(amount)} (ИТОГО ${formatMoney(amount * monthsCount)})?`)) return;
+
+            const baseTs = Date.now();
+            dates.forEach((d, i) => {
+                appState.calendarData.push({
+                    date: d,
+                    counterparty: counterparty,
+                    purpose: purpose || `Платёж по кредиту (${i+1}/${monthsCount})`,
+                    amount: amount,
+                    type: 'expense',
+                    articleKey: 'credit',
+                    source: 'credit',
+                    id: 'credit_' + baseTs + '_' + i
+                });
+            });
+
+            localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
+            document.getElementById('creditModal').classList.remove('active');
+            renderCreditsList();
+            if (typeof recalcDerivedData === 'function') recalcDerivedData();
+            if (typeof updateDashboard === 'function') updateDashboard();
+
+            alert(`Создано платежей: ${monthsCount}`);
         }
 
         function saveCreditPayment() {
