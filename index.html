@@ -1266,7 +1266,7 @@
                     <option value="manual">Вручную</option>
                 </select>
                 <input type="text" id="registrySearch" placeholder="Поиск по назначению..."
-                    oninput="updateRegistry()" style="padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; width: 250px;">
+                    oninput="debouncedUpdateRegistry()" style="padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; width: 250px;">
             </div>
             
             <div class="card">
@@ -1664,10 +1664,10 @@
                 { name: 'Бензин', key: 'fuel', type: 'expense', indent: true, level: 2 },
                 { name: 'Охрана труда', key: 'labor_safety', type: 'expense', indent: true, level: 2 },
                 { name: 'Миграционный учет', key: 'migration', type: 'expense', indent: true, level: 2 },
-                // Маркетинг — одна строка без раскрытия. Логика подсчёта: суммирует ads+yandex_budget+yandex_contractor
-                { name: 'Маркетинг', key: 'marketing_total', type: 'expense', indent: true, level: 2, virtual: true, virtualKeys: ['ads','yandex_budget','yandex_contractor'] },
-                // Прочее — одна строка без раскрытия. Логика подсчёта: суммирует other+one_time
-                { name: 'Прочее', key: 'other_total', type: 'expense', indent: true, level: 2, virtual: true, virtualKeys: ['other','one_time'] },
+                // Маркетинг — обычная статья
+                { name: 'Маркетинг', key: 'marketing', type: 'expense', indent: true, level: 2 },
+                // Прочее — обычная статья
+                { name: 'Прочее', key: 'other', type: 'expense', indent: true, level: 2 },
                 // Комиссия банка — подтягивается из банковских операций с articleKey='bank_commission'
                 { name: 'Комиссия банка', key: 'bank_commission', type: 'expense', indent: true, level: 2 },
                 // Офисные сотрудники — оставляем как раскрываемую группу
@@ -1706,6 +1706,68 @@
                 localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
                 console.log(`Migrated ${migrated} transactions to unallocated articles`);
             }
+
+            // === МИГРАЦИЯ старых ключей в новые ===
+            // ads / yandex_budget / yandex_contractor → marketing
+            // one_time → other
+            // cost_of_sales (банковские) → очищаем articleKey
+            // marketing_total → marketing (на случай если в данных уже есть виртуальный ключ)
+            // other_total → other
+            const keyRemap = {
+                'ads': 'marketing',
+                'yandex_budget': 'marketing',
+                'yandex_contractor': 'marketing',
+                'one_time': 'other',
+                'marketing_total': 'marketing',
+                'other_total': 'other'
+            };
+            let remapped = 0;
+            appState.calendarData.forEach(t => {
+                if (t.articleKey && keyRemap[t.articleKey]) {
+                    t.articleKey = keyRemap[t.articleKey];
+                    remapped++;
+                }
+                // Чистка cost_of_sales у банковских операций (статья удалена из ОПУ)
+                if (t.articleKey === 'cost_of_sales' && t.source === 'bank') {
+                    delete t.articleKey;
+                    remapped++;
+                }
+            });
+            if (remapped > 0) {
+                localStorage.setItem('calendarData', JSON.stringify(appState.calendarData));
+                console.log(`Remapped ${remapped} transactions to new article keys`);
+            }
+
+            // === ЧИСТКА устаревших статей из appState.articles ===
+            // Старые виртуальные / подключи могли сохраниться в облаке. Удаляем их.
+            const obsoleteKeys = ['ads','yandex_budget','yandex_contractor','one_time','marketing_total','other_total','cost_of_sales'];
+            const oldLen = appState.articles.length;
+            appState.articles = appState.articles.filter(a => !a.key || !obsoleteKeys.includes(a.key));
+            if (appState.articles.length !== oldLen) {
+                saveArticles();
+                console.log(`Removed ${oldLen - appState.articles.length} obsolete articles from articles list`);
+            }
+
+            // === ДОБАВЛЕНИЕ новых статей "Маркетинг" и "Прочее" в articles если их нет ===
+            const needed = [
+                { key: 'marketing', name: 'Маркетинг' },
+                { key: 'other', name: 'Прочее' }
+            ];
+            let added = false;
+            needed.forEach(n => {
+                if (!appState.articles.some(a => a.key === n.key)) {
+                    // Вставляем перед "Комиссия банка" (или в конец Постоянных расходов)
+                    const idx = appState.articles.findIndex(a => a.key === 'bank_commission');
+                    const newArt = { name: n.name, key: n.key, type: 'expense', indent: true, level: 2 };
+                    if (idx >= 0) {
+                        appState.articles.splice(idx, 0, newArt);
+                    } else {
+                        appState.articles.push(newArt);
+                    }
+                    added = true;
+                }
+            });
+            if (added) { saveArticles(); console.log('Added marketing and other articles'); }
 
             // Также проверяем что articles содержит нераспределённые (если пользователь загрузил старые articles из localStorage)
             const hasUnalloc = appState.articles.some(a => a.key === 'unallocated_income');
@@ -1782,10 +1844,15 @@
             }).format(value) + ' ₽';
         }
 
-        // Возвращает true, если статья является "подключом" виртуальной (Маркетинг/Прочее)
-        // Такие статьи не должны отображаться в ОПУ отдельной строкой — они свёрнуты в виртуальную
+        // Возвращает true, если статья является "подключом" виртуальной.
+        // После перехода на Вариант А (Маркетинг/Прочее — обычные статьи) подключей больше нет,
+        // но функция оставлена как защита и для обратной совместимости.
         function isHiddenSubKey(articleKey) {
             if (!articleKey) return false;
+            // По атрибуту hiddenSub
+            const def = appState.articles.find(a => a.key === articleKey);
+            if (def && def.hiddenSub) return true;
+            // По virtualKeys любой виртуальной статьи
             for (const a of appState.articles) {
                 if (a.virtual && Array.isArray(a.virtualKeys) && a.virtualKeys.includes(articleKey)) return true;
             }
@@ -6988,6 +7055,18 @@
         }
         
         
+        // Дебаунс поиска в реестре — ждём 250мс паузы в наборе перед фильтрацией.
+        // Это избавляет от подвисаний при больших объёмах данных (1500+ операций):
+        // вместо полной перерисовки на каждую букву — одна перерисовка после набора.
+        let _registrySearchTimer = null;
+        function debouncedUpdateRegistry() {
+            if (_registrySearchTimer) clearTimeout(_registrySearchTimer);
+            _registrySearchTimer = setTimeout(() => {
+                updateRegistry();
+                _registrySearchTimer = null;
+            }, 250);
+        }
+
         function updateRegistry() {
             const yearEl = document.getElementById('registryYear');
             const monthEl = document.getElementById('registryMonth');
@@ -7633,7 +7712,7 @@
             // - Для обычных статей: source != 'bank'
             // - Для "Комиссия банка": ТОЛЬКО source == 'bank'
             const ops = appState.calendarData.filter(t => {
-                if (!t.date.startsWith(monthKey)) return false;
+                if (!t.date || !t.date.startsWith(monthKey)) return false;
                 if (!keysToMatch.includes(t.articleKey)) return false;
                 if (isBankCommission) {
                     return t.source === 'bank';
@@ -7658,8 +7737,12 @@
             let html = `<p style="margin-bottom:12px;"><strong>${artName}</strong> — ${monthNames[parseInt(monthNum)]} ${year}</p>`;
 
             if (ops.length > 0) {
+                // В селекте статей: убираем зарплатные (ФОТ/НДФЛ/ПФР/ФСС, office_*) и виртуальные (Маркетинг/Прочее)
+                // Виртуальные нельзя выбирать — это агрегаты, операции назначаются на конкретные подключи
                 const regExcluded = ['fot','ndfl','pfr','fss','office_fot','office_ndfl','office_pfr','office_fss'];
-                const availArts = appState.articles.filter(a => a.key && !a.section && !a.subsection && !regExcluded.includes(a.key));
+                const availArts = appState.articles.filter(a =>
+                    a.key && !a.section && !a.subsection && !a.virtual && !regExcluded.includes(a.key)
+                );
 
                 html += `<p style="color:var(--text-secondary); margin-bottom:8px;">Операции: ${ops.length}</p>`;
                 html += '<div class="table-scroll" style="max-height:400px;"><table><thead><tr><th>Дата</th><th>Контрагент</th><th>Назначение</th><th style="text-align:right;">Сумма</th><th style="min-width:150px;">Статья</th><th>Источник</th></tr></thead><tbody>';
@@ -7667,8 +7750,14 @@
                 ops.forEach(t => {
                     total += t.amount || 0;
                     const realIdx = appState.calendarData.indexOf(t);
-                    const src = {bank:'Банк',sales:'Продажи',salary:'Зарплата',purchases:'Покупки'}[t.source] || t.source || '—';
-                    let artDrop = `<select onchange="opuChangeArticle(${realIdx}, this.value)" style="width:100%; padding:3px; font-size:11px;">`;
+                    const src = {bank:'Банк',sales:'Продажи',salary:'Зарплата',purchases:'Покупки',credit:'Кредит'}[t.source] || t.source || '—';
+                    // Если у операции articleKey не входит в availArts — добавим "невалидную" опцию,
+                    // чтобы было видно реальное состояние, а не "вылетал" Маркетинг по умолчанию
+                    const currentInAvail = availArts.some(a => a.key === t.articleKey);
+                    let artDrop = `<select onchange="opuChangeArticle(${realIdx}, this.value, '${articleKey}', '${monthNum}', '${year}')" style="width:100%; padding:3px; font-size:11px;">`;
+                    if (!currentInAvail) {
+                        artDrop += `<option value="${t.articleKey||''}" selected>⚠️ ${t.articleKey || '(не назначена)'}</option>`;
+                    }
                     availArts.forEach(a => { artDrop += `<option value="${a.key}" ${a.key === t.articleKey ? 'selected' : ''}>${a.name}</option>`; });
                     artDrop += '</select>';
                     html += `<tr><td style="white-space:nowrap;">${new Date(t.date).toLocaleDateString('ru-RU')}</td><td style="font-size:12px;">${t.counterparty||'—'}</td><td style="font-size:11px; max-width:200px; white-space:normal;">${(t.purpose||'').substring(0,60)}</td><td style="text-align:right;">${fmtMain(t.amount)} ₽</td><td>${artDrop}</td><td style="font-size:11px;">${src}</td></tr>`;
@@ -8223,7 +8312,7 @@
         }
 
         // === П.7 ОПУ детализация с корректировкой статьи ===
-        function opuChangeArticle(realIdx, newKey) {
+        function opuChangeArticle(realIdx, newKey, currentArticleKey, monthNum, year) {
             if (realIdx < 0 || realIdx >= appState.calendarData.length) return;
             appState.calendarData[realIdx].articleKey = newKey;
             const artDef = appState.articles.find(a => a.key === newKey);
@@ -8233,6 +8322,14 @@
             updateOPU();
             updateCalendar();
             updateDashboard();
+            // Если открыта модалка детализации — перерисовать её, чтобы пользователь видел свежие данные
+            // (и понимал куда ушла операция, если она поменяла категорию)
+            if (currentArticleKey && monthNum && year) {
+                const modal = document.getElementById('opsDetailModal');
+                if (modal && modal.classList.contains('active')) {
+                    showOPUDetail(currentArticleKey, monthNum, year);
+                }
+            }
         }
 
     </script>
